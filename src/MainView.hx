@@ -8,6 +8,9 @@ import haxe.ui.core.Component;
 
 import sys.FileSystem;
 
+import openfl.events.MouseEvent;
+
+
 import hx.files.*;
 
 // Application is called Touch File Manager
@@ -55,6 +58,7 @@ class MainView extends VBox {
             button.width = 100;
             button.height = 100;
             button.text = s;
+            button.addEventListener(MouseEvent.MOUSE_DOWN, function(e){trace(button.text + " Is held down");});
             button.onClick = function (e) {
                 trace(button.text + " has been clicked");
                 if (path.join(button.text).isDirectory()){
