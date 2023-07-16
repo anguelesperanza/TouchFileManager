@@ -2,6 +2,7 @@
     <style>
         .button {
             font-size: 10px;
+            <!-- button-icon: "haxeui-core/styles/default/haxeui_small.png"; -->
         }
     </style>
     <hbox width="100%" height="100%">

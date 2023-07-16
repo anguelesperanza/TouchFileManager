@@ -125,7 +125,7 @@ class MainView extends VBox {
             button.height = 100;
             button.text = s;
             // button.icon = "haxeui-core/styles/default/haxeui_small.png";
-            button.icon = "C:/Users/King-/Documents/Haxe Projects/FileManager/assets/images/folder.png";
+            // button.icon = "folder.png";
 
             // Checks if the left mouse click/touch is held
             // This was not added in button.OnClick as the file navigation failed when I tried.
