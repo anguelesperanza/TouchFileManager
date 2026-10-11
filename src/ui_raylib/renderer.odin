@@ -1,7 +1,6 @@
 package ui_raylib
 
 import "core:math"
-import "core:strings"
 import rl "vendor:raylib"
 import ui "../ui"
 
@@ -9,83 +8,30 @@ import ui "../ui"
 // ui.Draw_Commands, and answers text-measurement questions. This is the only
 // UI code that would be rewritten to move to another framework.
 
-// Fonts are rasterised per pixel size rather than scaling one atlas, because
-// a scaled bitmap atlas looks blurry at small sizes and the sizes in use are
-// few (one per font size per zoom level).
-Font_Key :: struct {
-	font:       ui.Font_Id,
-	pixel_size: i32,
-}
-
 Renderer :: struct {
-	font_path:     cstring,
-	fonts:         map[Font_Key]rl.Font,
-	textures:      map[ui.Image_Id]rl.Texture2D,
-	clip_stack:    [dynamic]rl.Rectangle,
-	scale:         f32,
-	cursor:        ui.Cursor,
-	cursor_set:    bool,
-	codepoints:    [dynamic]rune,
+	text:           Text_Cache,
+	textures:       map[ui.Image_Id]rl.Texture2D,
+	clip_stack:     [dynamic]rl.Rectangle,
+	scale:          f32,
+	cursor:         ui.Cursor,
+	cursor_set:     bool,
 	known_gamepads: bit_set[0 ..< MAX_GAMEPADS],
-}
-
-// Tried in order. The raylib default font is the last resort: it only has
-// ASCII and is a tiny bitmap, but it means a missing font file never stops
-// the program from starting.
-FONT_SEARCH_PATHS :: [?]cstring{
-	"assets/fonts/NotoSans-Regular.ttf",
-	"/usr/share/fonts/noto/NotoSans-Regular.ttf",
-	"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-	"/usr/share/fonts/TTF/DejaVuSans.ttf",
-	"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 }
 
 init :: proc(r: ^Renderer) {
 	r.scale = 1
-	for path in FONT_SEARCH_PATHS {
-		if rl.FileExists(path) {
-			r.font_path = path
-			break
-		}
-	}
-
-	// Basic Latin, Latin-1 Supplement and Latin Extended-A. raylib fonts are
-	// a fixed atlas, so anything outside this set (CJK, emoji, Cyrillic...)
-	// renders as '?'. A glyph atlas that grows on demand is the fix, and is
-	// planned for M1.
-	for c in rune(32) ..= rune(126) do append(&r.codepoints, c)
-	for c in rune(160) ..= rune(383) do append(&r.codepoints, c)
+	text_cache_init(&r.text)
 }
 
 destroy :: proc(r: ^Renderer) {
-	for _, font in r.fonts {
-		if font.texture.id != rl.GetFontDefault().texture.id do rl.UnloadFont(font)
-	}
+	text_cache_destroy(&r.text)
 	for _, texture in r.textures do rl.UnloadTexture(texture)
-	delete(r.fonts)
 	delete(r.textures)
 	delete(r.clip_stack)
-	delete(r.codepoints)
 }
 
 backend :: proc(r: ^Renderer) -> ui.Backend {
 	return ui.Backend{measure_text = measure_text, user_data = r}
-}
-
-get_font :: proc(r: ^Renderer, font: ui.Font_Id, pixel_size: i32) -> rl.Font {
-	key := Font_Key{font = font, pixel_size = pixel_size}
-	cached, ok := r.fonts[key]
-	if ok do return cached
-
-	loaded: rl.Font
-	if r.font_path != nil {
-		loaded = rl.LoadFontEx(r.font_path, pixel_size, raw_data(r.codepoints), i32(len(r.codepoints)))
-		rl.SetTextureFilter(loaded.texture, .BILINEAR)
-	} else {
-		loaded = rl.GetFontDefault()
-	}
-	r.fonts[key] = loaded
-	return loaded
 }
 
 @(private)
@@ -93,13 +39,14 @@ pixel_size_for :: proc(r: ^Renderer, size: f32) -> i32 {
 	return max(i32(math.round(size * r.scale)), 1)
 }
 
+// There's one font family for now, so `font` is unused; it's in the
+// interface so a bold or monospace face can be added without touching `ui`.
 @(private)
 measure_text :: proc(font: ui.Font_Id, size: f32, text: string, user_data: rawptr) -> ui.Vec2 {
 	r := (^Renderer)(user_data)
 	pixel_size := pixel_size_for(r, size)
-	text_c := strings.clone_to_cstring(text, context.temp_allocator)
-	measured := rl.MeasureTextEx(get_font(r, font, pixel_size), text_c, f32(pixel_size), 0)
-	return ui.Vec2{measured.x / r.scale, measured.y / r.scale}
+	width := text_width(&r.text, text, pixel_size)
+	return ui.Vec2{width / r.scale, f32(pixel_size) / r.scale}
 }
 
 // Images are registered by the app (thumbnails, icons) and referred to by id.
@@ -108,6 +55,14 @@ register_texture :: proc(r: ^Renderer, id: ui.Image_Id, texture: rl.Texture2D) {
 }
 
 render :: proc(r: ^Renderer, commands: []ui.Draw_Command, clear_color: ui.Color) {
+	// Rasterise every glyph this frame needs and upload the atlas once,
+	// before any draw call refers to it.
+	for command in commands {
+		text, is_text := command.(ui.Draw_Text)
+		if is_text do text_width(&r.text, text.text, pixel_size_for(r, text.size))
+	}
+	text_cache_flush(&r.text)
+
 	rl.ClearBackground(rl.Color(clear_color))
 	clear(&r.clip_stack)
 
@@ -132,9 +87,7 @@ render :: proc(r: ^Renderer, commands: []ui.Draw_Command, clear_color: ui.Color)
 			pixel_size := pixel_size_for(r, c.size)
 			// Whole-pixel positions keep glyphs crisp; fractional ones blur.
 			position := rl.Vector2{math.round(c.position.x * r.scale), math.round(c.position.y * r.scale)}
-			// ui guarantees a NUL after the text.
-			text_c := cstring(raw_data(c.text))
-			rl.DrawTextEx(get_font(r, c.font, pixel_size), text_c, position, f32(pixel_size), 0, rl.Color(c.color))
+			draw_text_cached(&r.text, c.text, position, pixel_size, rl.Color(c.color))
 		case ui.Draw_Image:
 			texture, ok := r.textures[c.image]
 			if !ok do continue

@@ -86,6 +86,10 @@ or only touch.** A feature that works with three of the four isn't finished.
   and Tab / shoulder buttons (moving between regions: sidebar, tab bar,
   file list, path bar). The focus ring is drawn whenever the last input
   came from a keyboard or controller.
+- **Every area is a region.** Wrap each distinct area (toolbar, sidebar,
+  each file view, a dialog) in `ui.begin_region` with a title and its rect.
+  That alone makes it reachable by Tab/shoulder cycling, by View + D-pad and
+  Ctrl+number jumps, and labelled in the jump overlay.
 - **No hover-only features.** Touch and controller have no hover. Anything
   revealed by hovering (tooltips, close buttons on tabs, row actions) must
   also be reachable another way -- shown on focus, or always visible.

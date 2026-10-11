@@ -10,14 +10,17 @@ import "core:math"
 // toolbar, file list. Each region remembers what was last focused in it, so
 // jumping away and back lands where you left off.
 
-begin_region :: proc(ctx: ^Context, label: string) {
-	id := get_id(ctx, label)
+// `title` names the region in the jump overlay and also scopes the ids of
+// the widgets inside it. `rect` is the area it covers on screen, used to
+// work out which region lies in which direction.
+begin_region :: proc(ctx: ^Context, title: string, rect: Rect) {
+	id := get_id(ctx, title)
 	append(&ctx.region_stack, id)
 	append(&ctx.id_stack, id)
 	for region in ctx.regions {
-		if region == id do return
+		if region.id == id do return
 	}
-	append(&ctx.regions, id)
+	append(&ctx.regions, Region{id = id, rect = rect, title = clone_to_frame(ctx, title)})
 }
 
 end_region :: proc(ctx: ^Context) {
@@ -34,6 +37,16 @@ register_focusable :: proc(ctx: ^Context, id: Id, rect: Rect) {
 
 set_focus :: proc(ctx: ^Context, id: Id) {
 	ctx.focus = id
+}
+
+has_focus :: proc(ctx: ^Context, id: Id) -> bool {
+	return ctx.focus == id
+}
+
+// A focused widget that handles a navigation action itself -- a list moving
+// its cursor down -- consumes it, so end_frame doesn't also move focus away.
+consume_nav :: proc(ctx: ^Context, action: Nav_Action) {
+	ctx.nav_pressed -= {action}
 }
 
 @(private)
@@ -93,7 +106,7 @@ move_focus_to_region :: proc(ctx: ^Context, step: int) {
 	index := find_focusable(ctx, ctx.focus)
 	if index >= 0 {
 		for region, i in ctx.regions {
-			if region == ctx.focusables[index].region do current = i
+			if region.id == ctx.focusables[index].region do current = i
 		}
 	}
 
@@ -102,7 +115,7 @@ move_focus_to_region :: proc(ctx: ^Context, step: int) {
 	if start < 0 && step < 0 do start = 0
 	for offset in 1 ..= count {
 		candidate := ((start + step * offset) % count + count) % count
-		if focus_region(ctx, ctx.regions[candidate]) do return
+		if focus_region(ctx, ctx.regions[candidate].id) do return
 	}
 }
 
@@ -111,7 +124,7 @@ move_focus_spatial :: proc(ctx: ^Context, direction: Vec2) {
 	index := find_focusable(ctx, ctx.focus)
 	if index < 0 {
 		// Nothing focused yet: the first press just shows where focus is.
-		if len(ctx.regions) > 0 && focus_region(ctx, ctx.regions[0]) do return
+		if len(ctx.regions) > 0 && focus_region(ctx, ctx.regions[0].id) do return
 		ctx.focus = ctx.focusables[0].id
 		return
 	}

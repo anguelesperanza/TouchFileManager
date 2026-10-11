@@ -46,6 +46,16 @@ Context :: struct {
 	press_position:   Vec2,
 	long_press_ended: bool,
 
+	last_click_id:       Id,
+	last_click_time:     f64,
+	last_click_position: Vec2,
+
+	// Seconds since the previous frame, clamped so a stall (a debugger
+	// pause, a suspended laptop) doesn't fling a scroll across the list.
+	delta_time: f32,
+
+	scroll_states: map[Id]Scroll_State,
+
 	// Pointer press/release events that arrived at a position the current
 	// `hot` wasn't computed for (a touch tap lands without a hover first).
 	// They are replayed next frame, once `hot` has caught up.
@@ -55,7 +65,7 @@ Context :: struct {
 
 	id_stack:      [dynamic]Id,
 	region_stack:  [dynamic]Id,
-	regions:       [dynamic]Id,
+	regions:       [dynamic]Region,
 	focusables:    [dynamic]Focusable,
 	hit_targets:   [dynamic]Hit_Target,
 	region_memory: map[Id]Id,
@@ -66,6 +76,18 @@ Context :: struct {
 	frame_arena:     vmem.Arena,
 	frame_allocator: mem.Allocator,
 
+	// Jumping straight to an area (see region_jump.odin).
+	region_jump_hold:       Trigger_List,
+	region_jump_directions: [Jump_Direction]Trigger_List,
+	area_bindings:          [MAX_NUMBERED_REGIONS]Trigger_List,
+	region_jump_held:    bool,
+	jump_hold_start:     f64,
+	jump_used_this_hold: bool,
+	jump_direction:      Vec2,
+	jump_index:          int,
+	control_hold_start:  f64,
+	show_region_overlay: bool,
+
 	cursor: Cursor,
 	// Set by widgets that need time to pass with no input (a long-press
 	// timer, an animation). The main loop must keep polling while it's set.
@@ -75,6 +97,14 @@ Context :: struct {
 	previous_hot:    Id,
 	previous_active: Id,
 	previous_focus:  Id,
+}
+
+// An area of the screen focus can jump between: the toolbar, the sidebar,
+// a file view. `title` is what the jump overlay calls it.
+Region :: struct {
+	id:    Id,
+	rect:  Rect,
+	title: string,
 }
 
 Focusable :: struct {
@@ -104,6 +134,7 @@ init :: proc(ctx: ^Context, backend: Backend) -> bool {
 	ctx.theme = default_theme()
 	ctx.scale = 1
 	ctx.nav_bindings = default_nav_bindings()
+	set_default_region_jump_bindings(ctx)
 	err := vmem.arena_init_growing(&ctx.frame_arena)
 	if err != nil do return false
 	ctx.frame_allocator = vmem.arena_allocator(&ctx.frame_arena)
@@ -117,6 +148,7 @@ destroy :: proc(ctx: ^Context) {
 	delete(ctx.focusables)
 	delete(ctx.hit_targets)
 	delete(ctx.region_memory)
+	delete(ctx.scroll_states)
 	delete(ctx.commands)
 	vmem.arena_destroy(&ctx.frame_arena)
 }
@@ -132,6 +164,7 @@ begin_frame :: proc(ctx: ^Context, input: Input) {
 
 	ctx.previous_input = ctx.input
 	ctx.input = input
+	ctx.delta_time = clamp(f32(input.time - ctx.previous_input.time), 0, 0.1)
 	ctx.cursor = .DEFAULT
 	ctx.wants_timer = false
 	ctx.focus_seen = false
@@ -143,6 +176,10 @@ begin_frame :: proc(ctx: ^Context, input: Input) {
 	replay_deferred_pointer_events(ctx)
 	update_gamepad_repeat(ctx)
 	update_input_mode(ctx)
+	// Before navigation: while the jump button is held, the buttons that
+	// pick a direction are taken out of this frame's input, so they don't
+	// also activate or go back.
+	update_region_jump(ctx)
 
 	ctx.nav_pressed = {}
 	for action in Nav_Action {
@@ -156,6 +193,8 @@ end_frame :: proc(ctx: ^Context) -> Frame {
 
 	update_hot(ctx)
 	update_focus_navigation(ctx)
+	apply_region_jump(ctx)
+	draw_region_overlay(ctx)
 
 	hash := hash_commands(ctx.commands[:])
 	changed := hash != ctx.previous_hash
@@ -167,6 +206,7 @@ end_frame :: proc(ctx: ^Context) -> Frame {
 	if ctx.focus != ctx.previous_focus do needs_another_frame = true
 	if ctx.deferred_pressed != {} || ctx.deferred_released != {} do needs_another_frame = true
 	if ctx.nav_pressed != {} do needs_another_frame = true
+	if ctx.jump_direction != {} || ctx.jump_index >= 0 do needs_another_frame = true
 
 	return Frame{
 		commands = ctx.commands[:],
