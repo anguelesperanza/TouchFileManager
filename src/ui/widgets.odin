@@ -131,10 +131,17 @@ panel :: proc(ctx: ^Context, rect: Rect) {
 
 // Returns the full set of interactions so the caller can react to both
 // CLICKED and SECONDARY. `button` is the shorthand for the common case.
-button_ex :: proc(ctx: ^Context, rect: Rect, text: string, selected: bool = false) -> Interactions {
+// A disabled button (enabled = false) is drawn dimmed and is neither
+// clickable nor a focus stop, so the D-pad skips straight over it.
+button_ex :: proc(ctx: ^Context, rect: Rect, text: string, selected: bool = false, enabled: bool = true) -> Interactions {
+	theme := &ctx.theme
+	if !enabled {
+		draw_rect(ctx, rect, {theme.button.r, theme.button.g, theme.button.b, 110}, theme.radius)
+		label(ctx, inset_xy(rect, theme.padding, 0), text, {theme.text_dim.r, theme.text_dim.g, theme.text_dim.b, 140}, .CENTER)
+		return {}
+	}
 	id := get_id(ctx, text)
 	result := interact(ctx, id, rect)
-	theme := &ctx.theme
 
 	color := theme.button
 	if .HOVERED in result do color = theme.button_hot
@@ -155,8 +162,8 @@ button_ex :: proc(ctx: ^Context, rect: Rect, text: string, selected: bool = fals
 	return result
 }
 
-button :: proc(ctx: ^Context, rect: Rect, text: string, selected: bool = false) -> bool {
-	return .CLICKED in button_ex(ctx, rect, text, selected)
+button :: proc(ctx: ^Context, rect: Rect, text: string, selected: bool = false, enabled: bool = true) -> bool {
+	return .CLICKED in button_ex(ctx, rect, text, selected, enabled)
 }
 
 // Like label, but text wider than the rect is cut short with an ellipsis

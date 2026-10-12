@@ -1,6 +1,7 @@
 package app
 
 import "core:fmt"
+import "core:strings"
 import "core:time/datetime"
 import "core:time/timezone"
 import "../fs"
@@ -40,12 +41,23 @@ Action :: enum u8 {
 	SPLIT_DOWN,
 	CLOSE_VIEW,
 	NEXT_VIEW,
+	COPY,
+	CUT,
+	PASTE,
+	RENAME,
+	NEW_FOLDER,
+	NEW_FILE,
+	TRASH,
+	DELETE_PERMANENTLY,
+	// Move focus to the action bar (the controller's way to the file
+	// actions until context menus arrive).
+	FOCUS_ACTIONS,
 }
 
 App :: struct {
 	bindings: [Action]ui.Trigger_List,
 	// Actions triggered this frame; filled once at the top of build.
-	pressed:  bit_set[Action; u32],
+	pressed:  bit_set[Action; u64],
 	// User zoom on top of the display's DPI scale.
 	zoom:     f32,
 
@@ -61,7 +73,19 @@ App :: struct {
 	// view just split off, or the one a tab switch landed on.
 	focus_view_next: ^View,
 
-	path_editor: Path_Editor,
+	entry: Text_Entry,
+
+	jobs:           fs.Job_Runner,
+	clipboard:      Clipboard,
+	// Paths waiting on the "Delete permanently?" dialog; empty when it's
+	// not showing.
+	pending_delete: [dynamic]string,
+	// A name to start renaming once it shows up in the active view: a
+	// folder or file just created.
+	rename_after_load: string,
+	focus_actions_next: bool,
+	// The home trash's files/ folder, shown under "Trash" in the sidebar.
+	trash_files: string,
 
 	// Status text is kept across frames, so it can't live in the temp
 	// allocator (freed every frame). It's formatted into this buffer.
@@ -86,7 +110,10 @@ init :: proc(a: ^App, start_path: string) {
 	a.zoom = 1
 	set_default_bindings(a)
 	fs.loader_init(&a.loader)
+	fs.job_runner_init(&a.jobs)
 	a.places = fs.load_places()
+	a.trash_files = fs.home_trash_files()
+	append(&a.places, fs.Place{name = strings.clone("Trash"), path = strings.clone(a.trash_files)})
 
 	region, ok := timezone.region_load("local")
 	if ok do a.time_zone = region
@@ -95,6 +122,13 @@ init :: proc(a: ^App, start_path: string) {
 }
 
 destroy :: proc(a: ^App) {
+	fs.job_runner_destroy(&a.jobs)
+	clipboard_clear(&a.clipboard)
+	delete(a.clipboard.paths)
+	clear_pending_delete(a)
+	delete(a.pending_delete)
+	delete(a.rename_after_load)
+	delete(a.trash_files)
 	fs.loader_destroy(&a.loader)
 	for result in a.results do fs.listing_free(result.listing)
 	delete(a.results)
@@ -108,7 +142,7 @@ destroy :: proc(a: ^App) {
 		delete(place.path)
 	}
 	delete(a.places)
-	path_editor_destroy(&a.path_editor)
+	text_entry_destroy(&a.entry)
 	if a.time_zone != nil do timezone.region_destroy(a.time_zone)
 }
 
@@ -153,6 +187,15 @@ set_default_bindings :: proc(a: ^App) {
 	a.bindings[.SPLIT_DOWN] = ui.triggers(key(.F3, {.SHIFT}))
 	a.bindings[.CLOSE_VIEW] = ui.triggers(key(.W, {.CONTROL, .SHIFT}))
 	a.bindings[.NEXT_VIEW] = ui.triggers(key(.F6))
+	a.bindings[.COPY] = ui.triggers(key(.C, {.CONTROL}))
+	a.bindings[.CUT] = ui.triggers(key(.X, {.CONTROL}))
+	a.bindings[.PASTE] = ui.triggers(key(.V, {.CONTROL}))
+	a.bindings[.RENAME] = ui.triggers(key(.F2))
+	a.bindings[.NEW_FOLDER] = ui.triggers(key(.N, {.CONTROL, .SHIFT}))
+	a.bindings[.NEW_FILE] = ui.triggers(key(.N, {.CONTROL, .ALT}))
+	a.bindings[.TRASH] = ui.triggers(key(.DELETE))
+	a.bindings[.DELETE_PERMANENTLY] = ui.triggers(key(.DELETE, {.SHIFT}))
+	a.bindings[.FOCUS_ACTIONS] = ui.triggers(pad(.FACE_UP))
 }
 
 action_pressed :: proc(a: ^App, ctx: ^ui.Context, action: Action) -> bool {
@@ -233,6 +276,15 @@ run_global_actions :: proc(a: ^App, ctx: ^ui.Context) {
 	if .SPLIT_DOWN in a.pressed do split_active_view(a, .VERTICAL, now)
 	if .CLOSE_VIEW in a.pressed do close_active_view(a)
 	if .NEXT_VIEW in a.pressed do focus_next_view(a)
+	if .COPY in a.pressed do copy_to_clipboard(a, ctx, .COPY)
+	if .CUT in a.pressed do copy_to_clipboard(a, ctx, .CUT)
+	if .PASTE in a.pressed do paste(a)
+	if .RENAME in a.pressed && len(operation_targets(view)) == 1 do start_rename(a, ctx, view, rename_position(view))
+	if .NEW_FOLDER in a.pressed do create_new(a, .CREATE_FOLDER)
+	if .NEW_FILE in a.pressed do create_new(a, .CREATE_FILE)
+	if .TRASH in a.pressed do trash_targets(a)
+	if .DELETE_PERMANENTLY in a.pressed do request_delete(a)
+	if .FOCUS_ACTIONS in a.pressed do a.focus_actions_next = true
 
 	// Escape (or B) first clears a selection. B is also GO_UP, so with
 	// nothing selected the same press goes up a folder.
@@ -254,17 +306,27 @@ toggle_hidden :: proc(view: ^View) {
 build :: proc(a: ^App, ctx: ^ui.Context) {
 	a.now = ctx.input.time
 	a.pressed = {}
-	// While a path is being typed, keys and buttons belong to the text
-	// field and the on-screen keyboard; none of them are app commands.
-	if !a.path_editor.editing {
+	// While text is being typed or a dialog is asking something, keys and
+	// buttons belong to them; none of them are app commands.
+	dialog_open := len(a.pending_delete) > 0
+	busy := a.entry.editing || dialog_open
+	if !busy {
 		for action in Action {
 			if ui.any_trigger_pressed(ctx, a.bindings[action]) do a.pressed += {action}
 		}
 	}
 
 	receive_listings(a)
+	receive_finished_jobs(a, ctx)
+	start_pending_rename(a, ctx)
 	apply_pending_focus(a, ctx)
-	if !a.path_editor.editing do run_global_actions(a, ctx)
+	if !busy do run_global_actions(a, ctx)
+	// B on a controller cancels typing. (Escape on a keyboard is handled by
+	// the text field, which owns the keyboard while typing.)
+	if a.entry.editing && ui.nav_pressed(ctx, .CANCEL) {
+		ui.consume_nav(ctx, .CANCEL)
+		stop_text_entry(a)
+	}
 
 	theme := &ctx.theme
 	screen := ui.screen_rect(ctx)
@@ -274,17 +336,21 @@ build :: proc(a: ^App, ctx: ^ui.Context) {
 	toolbar := ui.cut_top(&screen, TOOLBAR_HEIGHT)
 	status_bar := ui.cut_bottom(&screen, STATUS_BAR_HEIGHT)
 	keyboard_area: ui.Rect
-	if a.path_editor.editing && a.path_editor.show_keyboard {
+	if a.entry.editing && a.entry.show_keyboard {
 		keyboard_area = ui.cut_bottom(&screen, ui.on_screen_keyboard_height())
 	}
 	sidebar := ui.cut_left(&screen, SIDEBAR_WIDTH)
+	action_bar := ui.cut_bottom(&screen, ACTION_BAR_HEIGHT)
 
 	build_tab_bar(a, ctx, tab_bar)
 	build_toolbar(a, ctx, toolbar)
 	build_sidebar(a, ctx, sidebar)
 	build_split_node(a, ctx, active_tab(a), active_tab(a).root, screen)
+	build_action_bar(a, ctx, action_bar)
 	if keyboard_area.h > 0 do build_on_screen_keyboard(a, ctx, keyboard_area)
 	build_status_bar(a, ctx, status_bar)
+	// Last, so it sits on top of everything.
+	build_delete_dialog(a, ctx)
 
 	track_active_view(a, ctx)
 }
@@ -300,12 +366,12 @@ apply_pending_focus :: proc(a: ^App, ctx: ^ui.Context) {
 		ui.set_focus(ctx, a.focus_view_next.list_id)
 		a.focus_view_next = nil
 	}
-	if a.path_editor.focus_field_next && a.path_editor.field_id != 0 {
-		ui.set_focus(ctx, a.path_editor.field_id)
-		a.path_editor.focus_field_next = false
+	if a.entry.focus_field_next && a.entry.field_id != 0 {
+		ui.set_focus(ctx, a.entry.field_id)
+		a.entry.focus_field_next = false
 	}
 	view := active_view(a)
-	if ctx.focus == 0 && view.list_id != 0 && !a.path_editor.editing do ui.set_focus(ctx, view.list_id)
+	if ctx.focus == 0 && view.list_id != 0 && !a.entry.editing do ui.set_focus(ctx, view.list_id)
 }
 
 @(private)
@@ -404,10 +470,18 @@ build_status_bar :: proc(a: ^App, ctx: ^ui.Context, area: ui.Rect) {
 	zoom := fmt.tprintf("zoom %d%%", int(a.zoom * 100 + 0.5))
 	ui.label(ctx, ui.cut_right(&row, 90), zoom, dim, .RIGHT, 14)
 
-	if a.path_editor.editing {
+	if a.entry.editing {
 		hint := "Enter: go · Esc: cancel · Tab: complete"
-		if ctx.input_mode == .GAMEPAD do hint = "Menu: go · B: cancel · X: backspace · Y: space · LT/RT: move"
+		if a.entry.purpose == .RENAME do hint = "Enter: rename · Esc: cancel"
+		if ctx.input_mode == .GAMEPAD do hint = "Menu: accept · B: cancel · X: backspace · Y: space · LT/RT: move"
 		ui.label_clipped(ctx, row, hint, dim, .LEFT, 14)
+		return
+	}
+
+	// A running file operation takes over the status line until it's done.
+	progress := job_progress_text(a)
+	if len(progress) > 0 {
+		ui.label_clipped(ctx, row, progress, ctx.theme.text, .LEFT, 14)
 		return
 	}
 
@@ -439,4 +513,17 @@ display_name :: proc(a: ^App, path: string) -> string {
 		if place.path == path do return place.name
 	}
 	return fs.base_name(path)
+}
+
+// Starts renaming an item that was just created, once the refreshed
+// listing that contains it has arrived.
+@(private)
+start_pending_rename :: proc(a: ^App, ctx: ^ui.Context) {
+	if len(a.rename_after_load) == 0 do return
+	view := active_view(a)
+	if view.loading || view.listing == nil do return
+	position := find_position_by_name(view, a.rename_after_load)
+	delete(a.rename_after_load)
+	a.rename_after_load = ""
+	if position >= 0 do start_rename(a, ctx, view, position)
 }

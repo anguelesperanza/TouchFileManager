@@ -88,6 +88,15 @@ binding_slots :: proc(a: ^App, ctx: ^ui.Context) -> [dynamic]Binding_Slot {
 	add(&slots, "split_down", "Split the current view top and bottom", &a.bindings[.SPLIT_DOWN], both)
 	add(&slots, "close_view", "Close the current view of a split", &a.bindings[.CLOSE_VIEW], both)
 	add(&slots, "next_view", "Move to the next view of a split", &a.bindings[.NEXT_VIEW], both)
+	add(&slots, "copy", "Copy the selected items (or the one under the cursor)", &a.bindings[.COPY], both)
+	add(&slots, "cut", "Cut the selected items, to move them with paste", &a.bindings[.CUT], both)
+	add(&slots, "paste", "Paste copied or cut items into the current folder", &a.bindings[.PASTE], both)
+	add(&slots, "rename", "Rename the item", &a.bindings[.RENAME], both)
+	add(&slots, "new_folder", "Create a new folder here", &a.bindings[.NEW_FOLDER], both)
+	add(&slots, "new_file", "Create a new empty file here", &a.bindings[.NEW_FILE], both)
+	add(&slots, "trash", "Move the selected items to the trash", &a.bindings[.TRASH], both)
+	add(&slots, "delete_permanently", "Delete the selected items permanently (asks first)", &a.bindings[.DELETE_PERMANENTLY], both)
+	add(&slots, "focus_actions", "Move focus to the action bar (copy, paste, rename, trash…)", &a.bindings[.FOCUS_ACTIONS], both)
 	add(&slots, "toggle_hidden", "Show or hide hidden files", &a.bindings[.TOGGLE_HIDDEN], both)
 	add(&slots, "select_all", "Select every item", &a.bindings[.SELECT_ALL], both)
 	add(&slots, "toggle_selected", "Select or deselect the current item", &a.bindings[.TOGGLE_SELECTED], both)
@@ -115,6 +124,10 @@ bindings_path :: proc(allocator := context.allocator) -> string {
 // the rest of the file still applies.
 load_bindings :: proc(a: ^App, ctx: ^ui.Context, path: string) -> [dynamic]string {
 	problems := make([dynamic]string)
+	// Whatever happens below -- even writing a fresh file on the first run,
+	// when nothing is applied -- the chord buttons (View, LT, RT…) must be
+	// registered, or every View+… chord arrives as two plain presses.
+	defer update_gamepad_modifiers(a, ctx)
 	data, err := os.read_entire_file_from_path(path, context.temp_allocator)
 	if err != nil {
 		write_err := write_default_bindings(a, ctx, path)

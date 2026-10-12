@@ -21,78 +21,8 @@ SEGMENT_MAX_WIDTH :: 220
 SEGMENT_MIN_WIDTH :: 44
 SEGMENT_SEPARATOR_WIDTH :: 14
 
-Path_Editor :: struct {
-	editing:          bool,
-	field:            ui.Text_Field,
-	field_id:         ui.Id,
-	focus_field_next: bool,
-
-	show_keyboard:       bool,
-	keyboard:            ui.On_Screen_Keyboard,
-	focus_keyboard_next: bool,
-
-	// Tab completion for a folder other than the view's own is listed in
-	// the background; these say what to do with the result.
-	completion_generation: u64,
-	completion_pending:    bool,
-	completion_text:       string,
-	completion_directory:  string,
-	completion_prefix:     string,
-}
-
-path_editor_destroy :: proc(editor: ^Path_Editor) {
-	ui.text_field_destroy(&editor.field)
-	clear_completion(editor)
-}
-
-@(private)
-clear_completion :: proc(editor: ^Path_Editor) {
-	delete(editor.completion_text)
-	delete(editor.completion_directory)
-	delete(editor.completion_prefix)
-	editor.completion_text = ""
-	editor.completion_directory = ""
-	editor.completion_prefix = ""
-	editor.completion_pending = false
-}
-
-start_path_edit :: proc(a: ^App, ctx: ^ui.Context) {
-	editor := &a.path_editor
-	editor.editing = true
-	ui.text_field_set(&editor.field, active_view(a).path)
-	// Typing replaces the whole path, like a browser's address bar.
-	editor.field.all_selected = true
-	// A controller has no other way to type, so its keyboard comes up by
-	// itself, with focus on its keys; touch users ask for it with the ⌨
-	// button. Only one of the two may take focus, or the later one wins.
-	editor.show_keyboard = ctx.input_mode == .GAMEPAD
-	editor.focus_keyboard_next = editor.show_keyboard
-	editor.focus_field_next = !editor.show_keyboard
-}
-
-stop_path_edit :: proc(a: ^App) {
-	editor := &a.path_editor
-	editor.editing = false
-	editor.show_keyboard = false
-	clear_completion(editor)
-	a.focus_view_next = active_view(a)
-}
-
-@(private)
-submit_path_edit :: proc(a: ^App) {
-	text := strings.trim_space(ui.text_field_string(&a.path_editor.field))
-	if len(text) == 0 {
-		stop_path_edit(a)
-		return
-	}
-	view := active_view(a)
-	path := fs.resolve_path(text, view.path, a.places[0].path, context.temp_allocator)
-	navigate_to(a, view, path, a.now)
-	stop_path_edit(a)
-}
-
 build_path_bar :: proc(a: ^App, ctx: ^ui.Context, rect: ui.Rect) {
-	if a.path_editor.editing {
+	if a.entry.purpose == .PATH {
 		build_path_field(a, ctx, rect)
 	} else {
 		build_breadcrumb(a, ctx, rect)
@@ -101,53 +31,14 @@ build_path_bar :: proc(a: ^App, ctx: ^ui.Context, rect: ui.Rect) {
 
 @(private)
 build_path_field :: proc(a: ^App, ctx: ^ui.Context, rect: ui.Rect) {
-	editor := &a.path_editor
 	row := rect
 	keyboard_button := ui.cut_right(&row, 44)
 	ui.cut_right(&row, ctx.theme.spacing)
 
-	events := ui.text_field(ctx, "path", row, &editor.field, true)
-	editor.field_id = editor.field.id
-	if .SUBMITTED in events {
-		submit_path_edit(a)
-		return
-	}
-	if .CANCELLED in events {
-		stop_path_edit(a)
-		return
-	}
-	if .COMPLETE in events do complete_path(a)
-	if .CHANGED in events do editor.completion_pending = false
-
-	if ui.button(ctx, keyboard_button, "⌨", editor.show_keyboard) {
-		editor.show_keyboard = !editor.show_keyboard
-		editor.focus_keyboard_next = editor.show_keyboard
-		if !editor.show_keyboard do editor.focus_field_next = true
-	}
-
-	// B on a controller. (Escape on a keyboard is handled by the field,
-	// which owns the keyboard while editing.)
-	if ui.nav_pressed(ctx, .CANCEL) {
-		ui.consume_nav(ctx, .CANCEL)
-		stop_path_edit(a)
-	}
-}
-
-build_on_screen_keyboard :: proc(a: ^App, ctx: ^ui.Context, rect: ui.Rect) {
-	editor := &a.path_editor
-	events := ui.on_screen_keyboard(ctx, rect, &editor.field, &editor.keyboard)
-	if editor.focus_keyboard_next {
-		ui.focus_region_by_id(ctx, editor.keyboard.region_id)
-		editor.focus_keyboard_next = false
-	}
-	if .SUBMITTED in events {
-		submit_path_edit(a)
-		return
-	}
-	if .CLOSED in events {
-		editor.show_keyboard = false
-		editor.focus_field_next = true
-	}
+	events := ui.text_field(ctx, "path", row, &a.entry.field, true)
+	a.entry.field_id = a.entry.field.id
+	if handle_text_entry_events(a, events) do return
+	build_keyboard_toggle(a, ctx, keyboard_button)
 }
 
 @(private)
@@ -272,7 +163,7 @@ path_segments :: proc(a: ^App, path: string) -> []Segment {
 // folder matches.
 @(private)
 complete_path :: proc(a: ^App) {
-	editor := &a.path_editor
+	editor := &a.entry
 	view := active_view(a)
 	text := fs.expand_home(ui.text_field_string(&editor.field), a.places[0].path, context.temp_allocator)
 	slash := strings.last_index_byte(text, '/')
@@ -297,7 +188,7 @@ complete_path :: proc(a: ^App) {
 }
 
 receive_completion :: proc(a: ^App, listing: ^fs.Listing, generation: u64) {
-	editor := &a.path_editor
+	editor := &a.entry
 	if !editor.editing || !editor.completion_pending do return
 	if generation != editor.completion_generation do return
 	// Typing since Tab was pressed makes the result stale.
@@ -335,7 +226,7 @@ apply_completion :: proc(a: ^App, listing: ^fs.Listing, directory: string, prefi
 	if len(matches) == 1 && matches[0].kind == .DIRECTORY {
 		completed = strings.concatenate({completed, "/"}, context.temp_allocator)
 	}
-	ui.text_field_set(&a.path_editor.field, completed)
-	a.path_editor.field.all_selected = false
+	ui.text_field_set(&a.entry.field, completed)
+	a.entry.field.all_selected = false
 	if len(matches) > 1 do set_message(a, "%d matches", len(matches))
 }

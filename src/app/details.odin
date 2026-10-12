@@ -86,6 +86,8 @@ build_details_view :: proc(a: ^App, ctx: ^ui.Context, view: ^View, area: ui.Rect
 	if !showing_old && view.loading do message = "Loading…"
 	if showing_old && view.listing.error != .NONE {
 		message = fs.listing_error_message(view.listing.error)
+		// The trash folder only exists once something has been trashed.
+		if view.listing.error == .NOT_FOUND && view.path == a.trash_files do message = "The trash is empty."
 		showing_old = false
 	}
 	if showing_old && len(view.order) == 0 {
@@ -104,7 +106,8 @@ build_details_view :: proc(a: ^App, ctx: ^ui.Context, view: ^View, area: ui.Rect
 	// The old listing stays visible during the grace period, but rows
 	// mustn't act on it: its paths belong to the folder being left.
 	interactive := !view.loading && showing_old
-	if interactive && list.focused do handle_list_keys(a, ctx, view, list)
+	// While typing (a rename, a path), keys are text, not list commands.
+	if interactive && list.focused && !a.entry.editing do handle_list_keys(a, ctx, view, list)
 
 	if showing_old {
 		for position in list.first ..< list.last {
@@ -191,7 +194,18 @@ build_row :: proc(a: ^App, ctx: ^ui.Context, view: ^View, list: ui.Virtual_List,
 
 	name_color := theme.text
 	if .BROKEN_LINK in entry.flags || .HIDDEN in entry.flags do name_color = theme.text_dim
-	ui.label_clipped(ctx, columns.name, name, name_color)
+	renaming := a.entry.purpose == .RENAME && view.id == a.entry.rename_view_id && view.listing.path == a.entry.rename_directory && name == a.entry.rename_name
+	if renaming {
+		// The new name is typed right where the old one was.
+		field_rect := ui.Rect{columns.name.x - 4, rect.y + 3, columns.name.w + 4, rect.h - 6}
+		keyboard_button := ui.cut_right(&field_rect, 40)
+		ui.cut_right(&field_rect, 4)
+		events := ui.text_field(ctx, "rename", field_rect, &a.entry.field, true)
+		a.entry.field_id = a.entry.field.id
+		if !handle_text_entry_events(a, events) do build_keyboard_toggle(a, ctx, keyboard_button)
+	} else {
+		ui.label_clipped(ctx, columns.name, name, name_color)
+	}
 
 	if entry.kind == .FILE do ui.label(ctx, columns.size, format_size(entry.size), theme.text_dim, .RIGHT, 14)
 	if columns.show_modified do ui.label(ctx, columns.modified, format_modified(a, entry.modified), theme.text_dim, .LEFT, 14)

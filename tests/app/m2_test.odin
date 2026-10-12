@@ -159,25 +159,25 @@ path_edit_with_keyboard :: proc(t: ^testing.T) {
 
 	press_key(&h, .L, {.CONTROL})
 	run_frames(&h, 2)
-	testing.expect(t, h.state.path_editor.editing)
-	testing.expect(t, ui.has_focus(&h.ctx, h.state.path_editor.field_id), "the field has focus")
+	testing.expect(t, h.state.entry.editing)
+	testing.expect(t, ui.has_focus(&h.ctx, h.state.entry.field_id), "the field has focus")
 
 	// Typing replaces the selected path; a relative path is relative to
 	// the current folder. Backspace edits the text instead of going up.
 	type_text(&h, "folderx")
 	press_key(&h, .BACKSPACE)
 	testing.expect_value(t, view.path, h.dir)
-	testing.expect_value(t, ui.text_field_string(&h.state.path_editor.field), "folder")
+	testing.expect_value(t, ui.text_field_string(&h.state.entry.field), "folder")
 	press_key(&h, .ENTER)
 	wait_for_listing(t, &h)
-	testing.expect(t, !h.state.path_editor.editing)
+	testing.expect(t, !h.state.entry.editing)
 	testing.expect_value(t, fs.base_name(view.path), "folder")
 
 	// Escape cancels without going anywhere.
 	press_key(&h, .L, {.CONTROL})
 	type_text(&h, "/nowhere")
 	press_key(&h, .ESCAPE)
-	testing.expect(t, !h.state.path_editor.editing)
+	testing.expect(t, !h.state.entry.editing)
 	testing.expect_value(t, fs.base_name(view.path), "folder")
 }
 
@@ -192,16 +192,16 @@ path_tab_completion :: proc(t: ^testing.T) {
 	type_text(&h, h.dir)
 	type_text(&h, "/fol")
 	press_key(&h, .TAB)
-	testing.expect_value(t, ui.text_field_string(&h.state.path_editor.field), fs.join_path(h.dir, "folder/", context.temp_allocator))
+	testing.expect_value(t, ui.text_field_string(&h.state.entry.field), fs.join_path(h.dir, "folder/", context.temp_allocator))
 
 	// In another folder: listed in the background, then completed.
 	type_text(&h, "ins")
 	press_key(&h, .TAB)
 	for _ in 0 ..< 200 {
-		if !h.state.path_editor.completion_pending do break
+		if !h.state.entry.completion_pending do break
 		run_frame(&h)
 	}
-	testing.expect_value(t, ui.text_field_string(&h.state.path_editor.field), fs.join_path(h.dir, "folder/inside.txt", context.temp_allocator))
+	testing.expect_value(t, ui.text_field_string(&h.state.entry.field), fs.join_path(h.dir, "folder/inside.txt", context.temp_allocator))
 }
 
 @(test)
@@ -216,15 +216,15 @@ path_edit_with_controller :: proc(t: ^testing.T) {
 	// From a controller, editing brings up the on-screen keyboard.
 	app.start_path_edit(&h.state, &h.ctx)
 	run_frames(&h, 3)
-	testing.expect(t, h.state.path_editor.show_keyboard)
+	testing.expect(t, h.state.entry.show_keyboard)
 
 	// X is backspace; with the whole path selected it clears it.
 	press_pad(&h, .FACE_LEFT)
-	testing.expect_value(t, ui.text_field_string(&h.state.path_editor.field), "")
+	testing.expect_value(t, ui.text_field_string(&h.state.entry.field), "")
 
 	// B cancels.
 	press_pad(&h, .FACE_RIGHT)
-	testing.expect(t, !h.state.path_editor.editing)
+	testing.expect(t, !h.state.entry.editing)
 	testing.expect_value(t, view.path, h.dir)
 }
 

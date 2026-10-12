@@ -99,11 +99,24 @@ Context :: struct {
 	control_hold_start:  f64,
 	show_region_overlay: bool,
 
+	// Modal dialogs (see modal.odin).
+	modal_open:            bool,
+	modal_open_this_frame: bool,
+	modal_building:        bool,
+	modal_region:          Id,
+	modal_hit_start:       int,
+	modal_focus_start:     int,
+
 	// While a text field is being edited, key presses belong to it: keyboard
 	// bindings (Backspace = go up, arrows = move focus) are switched off. A
 	// field asks for this each frame it's active; it applies the next frame.
 	keyboard_captured:     bool,
 	capture_keyboard_next: bool,
+
+	// Show the focus ring even in pointer mode, until the pointer is used
+	// again: set when focus jumps somewhere the user didn't move it to (the
+	// on-screen keyboard opening), so they can see where it went.
+	focus_revealed: bool,
 
 	cursor: Cursor,
 	// Set by widgets that need time to pass with no input (a long-press
@@ -191,6 +204,7 @@ begin_frame :: proc(ctx: ^Context, input: Input) {
 	ctx.previous_focus = ctx.focus
 
 	ctx.keyboard_captured = ctx.capture_keyboard_next
+	if input.pointer_position != ctx.previous_input.pointer_position || input.mouse_pressed != {} do ctx.focus_revealed = false
 	ctx.capture_keyboard_next = false
 
 	replay_deferred_pointer_events(ctx)
@@ -211,6 +225,7 @@ end_frame :: proc(ctx: ^Context) -> Frame {
 	if ctx.active != 0 && !ctx.active_seen do ctx.active = 0
 	if ctx.focus != 0 && !ctx.focus_seen do ctx.focus = 0
 
+	apply_modal(ctx)
 	update_hot(ctx)
 	update_focus_navigation(ctx)
 	apply_region_jump(ctx)
@@ -242,7 +257,13 @@ screen_rect :: proc(ctx: ^Context) -> Rect {
 }
 
 show_focus_ring :: proc(ctx: ^Context) -> bool {
-	return ctx.input_mode != .POINTER
+	return ctx.input_mode != .POINTER || ctx.focus_revealed
+}
+
+// Shows the focus ring until the pointer is next used, after moving focus
+// somewhere on the user's behalf.
+reveal_focus :: proc(ctx: ^Context) {
+	ctx.focus_revealed = true
 }
 
 // ---------------------------------------------------------------------------

@@ -60,14 +60,16 @@ begin_virtual_list :: proc(ctx: ^Context, label: string, rect: Rect, item_count:
 	input := &ctx.input
 	content_height := f32(item_count) * item_height
 	max_offset := max(content_height - rect.h, 0)
-	inside := rect_contains(rect, input.pointer_position)
+	// Behind an open dialog, the list keeps still.
+	behind_modal := ctx.modal_open && !ctx.modal_building
+	inside := rect_contains(rect, input.pointer_position) && !behind_modal
 
 	if inside && input.wheel.y != 0 {
 		state.offset -= input.wheel.y * item_height * SCROLL_WHEEL_ROWS
 		state.velocity = 0
 	}
 
-	update_drag_scroll(ctx, id, state, inside)
+	if !behind_modal do update_drag_scroll(ctx, id, state, inside)
 
 	if !state.dragging && state.velocity != 0 {
 		state.offset += state.velocity * ctx.delta_time
@@ -77,7 +79,7 @@ begin_virtual_list :: proc(ctx: ^Context, label: string, rect: Rect, item_count:
 
 	focused := ctx.focus == id
 	stick := input.right_stick.y
-	if (focused || inside) && abs(stick) > STICK_DEADZONE {
+	if (focused || inside) && !behind_modal && abs(stick) > STICK_DEADZONE {
 		state.offset += stick * SCROLL_STICK_SPEED * ctx.delta_time
 		state.velocity = 0
 	}
