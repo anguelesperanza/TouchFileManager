@@ -94,3 +94,40 @@ lookup_user_dir :: proc(config: string, key: string, home: string) -> string {
 	}
 	return ""
 }
+
+// "~" or "~/x" -> the home folder; anything else unchanged.
+expand_home :: proc(path: string, home: string, allocator := context.allocator) -> string {
+	if path == "~" do return strings.clone(home, allocator)
+	if strings.has_prefix(path, "~/") do return join_path(home, path[2:], allocator)
+	return strings.clone(path, allocator)
+}
+
+// Turns what someone typed into a clean absolute path: expands "~", makes a
+// relative path relative to `base`, and resolves "." and "..", duplicate
+// slashes and a trailing slash. Purely textual -- symlinks are left as
+// they are, which is what you want for "../": back where you came from.
+resolve_path :: proc(typed: string, base: string, home: string, allocator := context.allocator) -> string {
+	expanded := expand_home(typed, home, context.temp_allocator)
+	if !strings.has_prefix(expanded, "/") do expanded = join_path(base, expanded, context.temp_allocator)
+
+	parts := make([dynamic]string, context.temp_allocator)
+	rest := expanded
+	for part in strings.split_iterator(&rest, "/") {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(parts) > 0 do pop(&parts)
+		case:
+			append(&parts, part)
+		}
+	}
+	if len(parts) == 0 do return strings.clone("/", allocator)
+
+	builder := strings.builder_make(allocator)
+	for part in parts {
+		strings.write_byte(&builder, '/')
+		strings.write_string(&builder, part)
+	}
+	return strings.to_string(builder)
+}

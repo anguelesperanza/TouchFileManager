@@ -166,9 +166,9 @@ tap_selects_then_opens :: proc(t: ^testing.T) {
 	harness_init(t, &h)
 	defer harness_destroy(&h)
 
-	// Row 0 is "folder"; rows start under the toolbar (60) and the column
+	// Row 0 is "folder"; rows start under the tab bar (44), toolbar (60) and column
 	// header (32), and right of the sidebar (200).
-	row_0 := ui.Vec2{500, 60 + 32 + 17}
+	row_0 := ui.Vec2{500, 44 + 60 + 32 + 17}
 	tap :: proc(h: ^Harness, position: ui.Vec2) {
 		h.input.pointer_position = position
 		run_frames(h, 2)
@@ -249,7 +249,7 @@ default_bindings_file_round_trips :: proc(t: ^testing.T) {
 
 	nav_before := h.ctx.nav_bindings
 	app_before := h.state.bindings
-	hold_before := h.ctx.region_jump_hold
+	hold_before := h.ctx.region_jump_activate
 
 	text := app.bindings_text(&h.state, &h.ctx, context.temp_allocator)
 	problems: [dynamic]string
@@ -258,7 +258,7 @@ default_bindings_file_round_trips :: proc(t: ^testing.T) {
 	testing.expectf(t, len(problems) == 0, "the default file parses cleanly: %v", problems[:])
 	testing.expect(t, h.ctx.nav_bindings == nav_before, "nav bindings unchanged")
 	testing.expect(t, h.state.bindings == app_before, "app bindings unchanged")
-	testing.expect(t, h.ctx.region_jump_hold == hold_before, "jump hold unchanged")
+	testing.expect(t, h.ctx.region_jump_activate == hold_before, "overlay binding unchanged")
 }
 
 @(test)
@@ -274,7 +274,7 @@ go_up = F2, Alt+Up   # replaces Backspace
 refresh =            # unbinds Ctrl+R
 
 [gamepad]
-area_jump_hold = Menu
+area_jump_overlay = Menu
 area_jump_up = DpadUp
 `
 	problems: [dynamic]string
@@ -286,7 +286,7 @@ area_jump_up = DpadUp
 	expected_go_up := ui.triggers(ui.pad(.FACE_RIGHT), ui.key(.F2), ui.key(.UP, {.ALT}))
 	testing.expectf(t, go_up == expected_go_up, "keyboard replaced, gamepad B kept: %v", go_up)
 	testing.expect(t, h.state.bindings[.REFRESH] == ui.Trigger_List{}, "refresh unbound")
-	testing.expect(t, h.ctx.region_jump_hold == ui.triggers(ui.pad(.START)), "hold rebound to Menu")
+	testing.expect(t, h.ctx.region_jump_activate == ui.triggers(ui.pad(.START)), "overlay rebound to Menu")
 	testing.expect(t, h.ctx.region_jump_directions[.UP] == ui.triggers(ui.pad(.DPAD_UP)))
 	// Not mentioned: keeps its default.
 	testing.expect(t, h.ctx.region_jump_directions[.DOWN] == ui.triggers(ui.pad(.FACE_DOWN)))
@@ -312,7 +312,7 @@ go_home = Ctrl+Banana, Alt+Home
 [gamepad]
 area_1 = A
 select_all = Turbo
-[mouse]
+[trackpad]
 `
 	problems: [dynamic]string
 	defer {

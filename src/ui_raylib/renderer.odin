@@ -1,6 +1,7 @@
 package ui_raylib
 
 import "core:math"
+import "core:strings"
 import rl "vendor:raylib"
 import ui "../ui"
 
@@ -31,7 +32,24 @@ destroy :: proc(r: ^Renderer) {
 }
 
 backend :: proc(r: ^Renderer) -> ui.Backend {
-	return ui.Backend{measure_text = measure_text, user_data = r}
+	return ui.Backend{
+		measure_text = measure_text,
+		get_clipboard = get_clipboard,
+		set_clipboard = set_clipboard,
+		user_data = r,
+	}
+}
+
+@(private)
+get_clipboard :: proc(user_data: rawptr, allocator := context.temp_allocator) -> string {
+	text := rl.GetClipboardText()
+	if text == nil do return ""
+	return strings.clone_from_cstring(text, allocator)
+}
+
+@(private)
+set_clipboard :: proc(user_data: rawptr, text: string) {
+	rl.SetClipboardText(strings.clone_to_cstring(text, context.temp_allocator))
 }
 
 @(private)

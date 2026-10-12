@@ -6,8 +6,11 @@ import vmem "core:mem/virtual"
 // The one thing `ui` needs to ask the backend during a frame. Everything
 // else flows one way: Input in, Draw_Commands out.
 Backend :: struct {
-	measure_text: proc(font: Font_Id, size: f32, text: string, user_data: rawptr) -> Vec2,
-	user_data:    rawptr,
+	measure_text:  proc(font: Font_Id, size: f32, text: string, user_data: rawptr) -> Vec2,
+	// Optional. Text fields use them for Ctrl+C / Ctrl+V.
+	get_clipboard: proc(user_data: rawptr, allocator := context.temp_allocator) -> string,
+	set_clipboard: proc(user_data: rawptr, text: string),
+	user_data:     rawptr,
 }
 
 // How long a press must be held, without the pointer wandering, to count as
@@ -77,16 +80,30 @@ Context :: struct {
 	frame_allocator: mem.Allocator,
 
 	// Jumping straight to an area (see region_jump.odin).
-	region_jump_hold:       Trigger_List,
+	region_jump_activate:   Trigger_List,
+	region_jump_mode:       Area_Jump_Mode,
+	region_jump_toggled:    bool,
+	region_jump_opened_at:  f64,
 	region_jump_directions: [Jump_Direction]Trigger_List,
 	area_bindings:          [MAX_NUMBERED_REGIONS]Trigger_List,
 	region_jump_held:    bool,
+	// Gamepad buttons that take part in chords ("View+RT", "LT+RT"), set by
+	// the app from its bindings. The area-jump chord's buttons always do.
+	gamepad_modifiers:     Gamepad_Buttons,
+	gamepad_layer_held:    bool,
+	gamepad_layer_pressed: Gamepad_Buttons,
 	jump_hold_start:     f64,
 	jump_used_this_hold: bool,
 	jump_direction:      Vec2,
 	jump_index:          int,
 	control_hold_start:  f64,
 	show_region_overlay: bool,
+
+	// While a text field is being edited, key presses belong to it: keyboard
+	// bindings (Backspace = go up, arrows = move focus) are switched off. A
+	// field asks for this each frame it's active; it applies the next frame.
+	keyboard_captured:     bool,
+	capture_keyboard_next: bool,
 
 	cursor: Cursor,
 	// Set by widgets that need time to pass with no input (a long-press
@@ -172,6 +189,9 @@ begin_frame :: proc(ctx: ^Context, input: Input) {
 	ctx.previous_hot = ctx.hot
 	ctx.previous_active = ctx.active
 	ctx.previous_focus = ctx.focus
+
+	ctx.keyboard_captured = ctx.capture_keyboard_next
+	ctx.capture_keyboard_next = false
 
 	replay_deferred_pointer_events(ctx)
 	update_gamepad_repeat(ctx)

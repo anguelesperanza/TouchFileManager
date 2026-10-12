@@ -47,10 +47,27 @@ View :: struct {
 	// give it focus.
 	list_id: ui.Id,
 
+	// Back/forward history. Each entry remembers the item the cursor was
+	// on, so going back lands where you were.
+	back:    [dynamic]History_Entry,
+	forward: [dynamic]History_Entry,
+
+	// Where the view was drawn last frame, for split size checks.
+	rect:      ui.Rect,
+	// The view's focus region, so the app can tell which view is active.
+	region_id: ui.Id,
+
 	type_ahead:      [64]u8,
 	type_ahead_len:  int,
 	type_ahead_time: f64,
 }
+
+History_Entry :: struct {
+	path:        string,
+	cursor_name: string,
+}
+
+MAX_HISTORY :: 100
 
 Split_Direction :: enum u8 {
 	HORIZONTAL,
@@ -81,6 +98,10 @@ view_create :: proc(id: u64, path: string) -> ^View {
 }
 
 view_destroy :: proc(view: ^View) {
+	clear_history(&view.back)
+	clear_history(&view.forward)
+	delete(view.back)
+	delete(view.forward)
 	delete(view.path)
 	if view.listing != nil do fs.listing_free(view.listing)
 	delete(view.order)
@@ -97,7 +118,35 @@ split_node_destroy :: proc(node: ^Split_Node) {
 	free(node)
 }
 
-navigate_to :: proc(a: ^App, view: ^View, path: string, now: f64) {
+@(private)
+clear_history :: proc(entries: ^[dynamic]History_Entry) {
+	for entry in entries {
+		delete(entry.path)
+		delete(entry.cursor_name)
+	}
+	clear(entries)
+}
+
+@(private)
+current_history_entry :: proc(view: ^View) -> History_Entry {
+	name := ""
+	entry, ok := cursor_entry(view)
+	if ok do name = fs.entry_name(view.listing, entry)
+	return History_Entry{path = strings.clone(view.path), cursor_name = strings.clone(name)}
+}
+
+// Going somewhere new records where the view was, and forgets the forward
+// history, like a web browser.
+navigate_to :: proc(a: ^App, view: ^View, path: string, now: f64, record_history := true) {
+	if record_history && path != view.path && view.listing != nil {
+		if len(view.back) >= MAX_HISTORY {
+			delete(view.back[0].path)
+			delete(view.back[0].cursor_name)
+			ordered_remove(&view.back, 0)
+		}
+		append(&view.back, current_history_entry(view))
+		clear_history(&view.forward)
+	}
 	new_path := strings.clone(path)
 	delete(view.path)
 	view.path = new_path
@@ -106,6 +155,25 @@ navigate_to :: proc(a: ^App, view: ^View, path: string, now: f64) {
 	view.loading_since = now
 	view.type_ahead_len = 0
 	fs.request_listing(&a.loader, view.id, view.generation, view.path, view.sort, view.show_hidden)
+}
+
+go_back :: proc(a: ^App, view: ^View, now: f64) {
+	travel_history(a, view, &view.back, &view.forward, now)
+}
+
+go_forward :: proc(a: ^App, view: ^View, now: f64) {
+	travel_history(a, view, &view.forward, &view.back, now)
+}
+
+@(private)
+travel_history :: proc(a: ^App, view: ^View, from: ^[dynamic]History_Entry, to: ^[dynamic]History_Entry, now: f64) {
+	if len(from) == 0 do return
+	append(to, current_history_entry(view))
+	entry := pop(from)
+	delete(view.select_after_load)
+	view.select_after_load = entry.cursor_name
+	navigate_to(a, view, entry.path, now, false)
+	delete(entry.path)
 }
 
 go_up :: proc(a: ^App, view: ^View, now: f64) {
@@ -122,7 +190,7 @@ refresh :: proc(a: ^App, view: ^View, now: f64) {
 		delete(view.select_after_load)
 		view.select_after_load = strings.clone(fs.entry_name(view.listing, entry))
 	}
-	navigate_to(a, view, view.path, now)
+	navigate_to(a, view, view.path, now, false)
 }
 
 // Installs a finished listing. Results for an older request (the user has

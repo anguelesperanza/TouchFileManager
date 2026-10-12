@@ -8,26 +8,28 @@ import "core:strings"
 // Moving focus one widget at a time is fine inside an area but slow and
 // unpredictable across them, especially on a controller. So, by default:
 //
-//   controller -- hold View and press a face button: Y up, A down, X left,
-//                 B right. Focus jumps to the area in that direction. While
-//                 View is held, every area is outlined and labelled with the
-//                 button that reaches it. (View + D-pad was tried first, but
-//                 it puts both on the left thumb.)
+//   controller -- press LT+RT together: every area is outlined and labelled
+//                 with the face button that reaches it (Y up, A down, X
+//                 left, B right). Press one to jump there. LT+RT again
+//                 closes the overlay. With area_jump_mode = hold, the
+//                 overlay shows only while LT+RT are held instead.
 //   keyboard   -- Ctrl+1 … Ctrl+9 jump to areas by number. Holding the
 //                 modifier on its own for a moment shows the same overlay,
 //                 numbered.
 //
-// All of these are bindings the user's config can change. Areas are the
-// regions registered with begin_region, so new ones (another split view)
-// join in without any extra code.
+// (Hold View + D-pad, then hold View + face buttons, came first; both were
+// awkward to hold while choosing.)
+//
+// All of these are bindings and options the user's config can change. Areas
+// are the regions registered with begin_region, so new ones (another split
+// view) join in without any extra code.
 
-// A hold button released sooner than this, without picking a direction, was
-// a tap: it's passed on as an ordinary press, so a button can be both the
-// jump modifier (held) and something else (tapped) -- Menu, say, which also
-// opens the context menu.
+// A chord button released sooner than this, without being used in a chord,
+// was a tap: it's passed on as an ordinary press, so a button can be part of
+// a chord (LT+RT) and still do its own job when tapped (LT pages up).
 JUMP_HOLD_TAP_SECONDS :: 0.3
 
-// The overlay waits this long into a hold, so a tap doesn't flash it.
+// In hold mode the overlay waits this long, so a quick tap doesn't flash it.
 JUMP_OVERLAY_HOLD_DELAY :: 0.15
 
 // How long the area modifier must be held alone before the overlay appears.
@@ -35,6 +37,13 @@ JUMP_OVERLAY_HOLD_DELAY :: 0.15
 REGION_OVERLAY_DELAY :: 0.45
 
 MAX_NUMBERED_REGIONS :: 9
+
+Area_Jump_Mode :: enum u8 {
+	// The activation chord opens the overlay; pressing it again closes it.
+	TOGGLE,
+	// The overlay is open only while the activation chord is held.
+	HOLD,
+}
 
 Jump_Direction :: enum u8 {
 	UP,
@@ -58,7 +67,8 @@ JUMP_ARROWS := [Jump_Direction]string{
 }
 
 set_default_region_jump_bindings :: proc(ctx: ^Context) {
-	ctx.region_jump_hold = triggers(pad(.SELECT))
+	ctx.region_jump_activate = triggers(pad_chord(.LEFT_TRIGGER, .RIGHT_TRIGGER))
+	ctx.region_jump_mode = .TOGGLE
 	// The face buttons as a diamond: their positions match the directions.
 	ctx.region_jump_directions[.UP] = triggers(pad(.FACE_UP))
 	ctx.region_jump_directions[.DOWN] = triggers(pad(.FACE_DOWN))
@@ -69,46 +79,118 @@ set_default_region_jump_bindings :: proc(ctx: ^Context) {
 	}
 }
 
+// Chord buttons -- every button in any chord, both halves -- form a layer:
+// while one is held, every button press goes to ctx.gamepad_layer_pressed,
+// where chords look for it, instead of doing its usual job. A chord button
+// tapped on its own is passed on as an ordinary press when it's released.
+//
+// Both halves count, so a chord works pressed in either order: LT then RT,
+// RT then LT, or both at once. The cost is that a chord button's own job
+// happens on release rather than press, which is why tab switching (LB/RB)
+// deliberately isn't in any default chord.
+@(private)
+update_gamepad_layer :: proc(ctx: ^Context) {
+	input := &ctx.input
+	modifiers := ctx.gamepad_modifiers + chord_buttons(ctx.region_jump_activate)
+
+	was_held := ctx.gamepad_layer_held
+	ctx.gamepad_layer_held = input.gamepad_connected && input.gamepad_down & modifiers != {}
+	ctx.gamepad_layer_pressed = {}
+	pressed := ctx.gamepad_repeated
+
+	if ctx.gamepad_layer_held && !was_held {
+		ctx.jump_hold_start = input.time
+		ctx.jump_used_this_hold = false
+	}
+	if ctx.gamepad_layer_held {
+		ctx.gamepad_layer_pressed = pressed
+		ctx.gamepad_repeated = {}
+		// A press joining a layer that was already held, or several buttons
+		// at once, is a chord. One chord button going down alone isn't, yet.
+		if was_held && pressed != {} do ctx.jump_used_this_hold = true
+		if card(pressed) > 1 do ctx.jump_used_this_hold = true
+	}
+	if was_held && !ctx.gamepad_layer_held {
+		was_tap := !ctx.jump_used_this_hold && input.time - ctx.jump_hold_start < JUMP_HOLD_TAP_SECONDS
+		if was_tap do ctx.gamepad_repeated += ctx.previous_input.gamepad_down & modifiers
+	}
+}
+
+// Every button named in a chord in `list`, both halves.
+chord_buttons :: proc(list: Trigger_List) -> Gamepad_Buttons {
+	buttons: Gamepad_Buttons
+	for trigger in list {
+		chord, is_chord := trigger.(Gamepad_Chord)
+		if is_chord do buttons += {chord.modifier, chord.button}
+	}
+	return buttons
+}
+
+// Whether every button of a trigger is held right now.
+@(private)
+trigger_held :: proc(ctx: ^Context, trigger: Trigger) -> bool {
+	down := ctx.input.gamepad_down
+	#partial switch t in trigger {
+	case Gamepad_Button:
+		return t in down
+	case Gamepad_Chord:
+		return t.modifier in down && t.button in down
+	}
+	return false
+}
+
 @(private)
 update_region_jump :: proc(ctx: ^Context) {
 	ctx.jump_direction = {}
 	ctx.jump_index = -1
 	input := &ctx.input
 
-	hold_buttons: Gamepad_Buttons
-	for trigger in ctx.region_jump_hold {
-		button, is_button := trigger.(Gamepad_Button)
-		if is_button do hold_buttons += {button}
-	}
-	was_held := ctx.region_jump_held
-	ctx.region_jump_held = input.gamepad_connected && input.gamepad_down & hold_buttons != {}
+	update_gamepad_layer(ctx)
 
-	if ctx.region_jump_held && !was_held {
-		ctx.jump_hold_start = input.time
-		ctx.jump_used_this_hold = false
+	was_active := ctx.region_jump_held
+	active := false
+	switch ctx.region_jump_mode {
+	case .HOLD:
+		for trigger in ctx.region_jump_activate {
+			if trigger != nil && trigger_held(ctx, trigger) do active = true
+		}
+	case .TOGGLE:
+		if any_trigger_pressed(ctx, ctx.region_jump_activate) do ctx.region_jump_toggled = !ctx.region_jump_toggled
+		active = ctx.region_jump_toggled
 	}
-	// The hold button's own press never fires its other bindings straight
-	// away; a quick release with no jump replays it as a tap instead.
-	ctx.gamepad_repeated -= hold_buttons
-	if was_held && !ctx.region_jump_held {
-		was_tap := !ctx.jump_used_this_hold && input.time - ctx.jump_hold_start < JUMP_HOLD_TAP_SECONDS
-		if was_tap do ctx.gamepad_repeated += ctx.previous_input.gamepad_down & hold_buttons
+	if !input.gamepad_connected {
+		ctx.region_jump_toggled = false
+		active = false
 	}
+	ctx.region_jump_held = active
+	if active && !was_active do ctx.region_jump_opened_at = input.time
 
-	if ctx.region_jump_held {
+	if active {
+		// The direction buttons pick an area instead of doing their usual
+		// job: A mustn't open a file and B mustn't go up a folder while
+		// they're choosing. Taken from both the layer (hold mode, where the
+		// chord is down) and plain presses (toggle mode).
 		for direction in Jump_Direction {
-			if any_trigger_pressed(ctx, ctx.region_jump_directions[direction]) {
-				ctx.jump_direction = JUMP_VECTORS[direction]
-				ctx.jump_used_this_hold = true
-			}
-			// Swallow these buttons whether or not they were pressed this
-			// frame, so A doesn't open a file and B doesn't go up a folder
-			// while they're picking an area.
 			for trigger in ctx.region_jump_directions[direction] {
 				button, is_button := trigger.(Gamepad_Button)
-				if is_button do ctx.gamepad_repeated -= {button}
+				if !is_button do continue
+				if button in ctx.gamepad_repeated || button in ctx.gamepad_layer_pressed {
+					ctx.jump_direction = JUMP_VECTORS[direction]
+				}
+				ctx.gamepad_repeated -= {button}
+				ctx.gamepad_layer_pressed -= {button}
 			}
 		}
+		// While the overlay is up, the controller does nothing else: only
+		// its own buttons (the activation chord, already handled above, and
+		// the jump buttons) work. The D-pad, both sticks, the shoulders and
+		// every other button and chord are switched off, so nothing moves
+		// behind the overlay while an area is being picked. Keyboard and
+		// mouse are left alone; the overlay belongs to the controller.
+		ctx.gamepad_repeated = {}
+		ctx.gamepad_layer_pressed = {}
+		input.left_stick = {}
+		input.right_stick = {}
 	}
 
 	for binding, i in ctx.area_bindings {
@@ -127,7 +209,12 @@ update_region_jump :: proc(ctx: ^Context) {
 		ctx.control_hold_start = 0
 	}
 	held_long_enough := modifier_alone && input.time - ctx.control_hold_start >= REGION_OVERLAY_DELAY
-	hold_shown := ctx.region_jump_held && (ctx.jump_used_this_hold || input.time - ctx.jump_hold_start >= JUMP_OVERLAY_HOLD_DELAY)
+	// Toggle mode shows at once -- the chord was a deliberate press. Hold
+	// mode waits a moment, so brushing the chord doesn't flash it.
+	hold_shown := false
+	if ctx.region_jump_held {
+		hold_shown = ctx.region_jump_mode == .TOGGLE || input.time - ctx.region_jump_opened_at >= JUMP_OVERLAY_HOLD_DELAY
+	}
 	ctx.show_region_overlay = hold_shown || held_long_enough
 }
 
@@ -139,26 +226,44 @@ area_key_modifiers :: proc(ctx: ^Context) -> Modifiers {
 	return chord.modifiers
 }
 
+// The first gamepad binding in a list, written out ("LT+RT"), or "".
+@(private)
+first_gamepad_trigger_name :: proc(list: Trigger_List) -> string {
+	for trigger in list {
+		#partial switch _ in trigger {
+		case Gamepad_Button, Gamepad_Chord:
+			return trigger_to_string(trigger, context.temp_allocator)
+		}
+	}
+	return ""
+}
+
+// "Y/A/X/B": the buttons that pick up, down, left and right.
+@(private)
+direction_button_names :: proc(ctx: ^Context) -> string {
+	builder := strings.builder_make(context.temp_allocator)
+	for direction, i in Jump_Direction {
+		button, ok := first_gamepad_button(ctx.region_jump_directions[direction])
+		if !ok do continue
+		if i > 0 do strings.write_byte(&builder, '/')
+		strings.write_string(&builder, GAMEPAD_NAMES[button])
+	}
+	return strings.to_string(builder)
+}
+
 // A one-line explanation of the area jump for the current device, built
 // from the live bindings so it's right after the user changes them:
 // "Hold View + Y/A/X/B to jump between areas".
 region_jump_hint :: proc(ctx: ^Context, allocator := context.temp_allocator) -> string {
 	#partial switch ctx.input_mode {
 	case .GAMEPAD:
-		hold, has_hold := first_gamepad_button(ctx.region_jump_hold)
-		if !has_hold do return ""
-		builder := strings.builder_make(allocator)
-		strings.write_string(&builder, "Hold ")
-		strings.write_string(&builder, GAMEPAD_NAMES[hold])
-		strings.write_string(&builder, " + ")
-		for direction, i in Jump_Direction {
-			button, ok := first_gamepad_button(ctx.region_jump_directions[direction])
-			if !ok do continue
-			if i > 0 do strings.write_byte(&builder, '/')
-			strings.write_string(&builder, GAMEPAD_NAMES[button])
+		activate := first_gamepad_trigger_name(ctx.region_jump_activate)
+		if len(activate) == 0 do return ""
+		directions := direction_button_names(ctx)
+		if ctx.region_jump_mode == .HOLD {
+			return strings.concatenate({"Hold ", activate, ", then ", directions, " to jump between areas"}, allocator)
 		}
-		strings.write_string(&builder, " to jump between areas")
-		return strings.to_string(builder)
+		return strings.concatenate({activate, " shows the areas · ", directions, " jumps"}, allocator)
 	case .KEYBOARD:
 		first, has_first := first_key_chord(ctx.area_bindings[0])
 		if !has_first do return ""
@@ -280,6 +385,20 @@ draw_region_overlay :: proc(ctx: ^Context) {
 			if ok do hint = clone_to_frame(ctx, trigger_to_string(chord, context.temp_allocator))
 		}
 		draw_region_badge(ctx, region, hint, is_current)
+	}
+
+	// In toggle mode the overlay stays until closed, so say how.
+	if ctx.region_jump_held && ctx.region_jump_mode == .TOGGLE {
+		activate := first_gamepad_trigger_name(ctx.region_jump_activate)
+		if len(activate) > 0 {
+			footer := concatenate_frame(ctx, activate, ": close")
+			screen := screen_rect(ctx)
+			size := measure_text(ctx, footer, 16)
+			box := Rect{screen.x + (screen.w - size.x) / 2 - 14, screen.y + screen.h - size.y - 64, size.x + 28, size.y + 16}
+			draw_rect(ctx, box, ctx.theme.panel, ctx.theme.radius)
+			draw_rect_outline(ctx, box, ctx.theme.focus_ring, ctx.theme.radius, 1.5)
+			label(ctx, box, footer, ctx.theme.text, .CENTER, 16)
+		}
 	}
 }
 

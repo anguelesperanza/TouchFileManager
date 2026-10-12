@@ -250,6 +250,7 @@ list_frame :: proc(h: ^List_Harness) {
 	ui.end_frame(&h.ctx)
 	h.input.mouse_pressed = {}
 	h.input.mouse_released = {}
+	h.input.gamepad_pressed = {}
 	h.input.time += 1.0 / 60.0
 }
 
@@ -312,56 +313,113 @@ double_click_detected :: proc(t: ^testing.T) {
 	testing.expect(t, .DOUBLE_CLICKED not_in h.results[0], "a slow second click isn't")
 }
 
+// Presses `buttons` together on one frame, holds for a frame, releases.
+press_together :: proc(h: ^Harness, buttons: ui.Gamepad_Buttons) {
+	h.input.gamepad_down = buttons
+	h.input.gamepad_pressed = buttons
+	run_frame(h)
+	h.input.gamepad_down = {}
+	run_frame(h)
+	run_frame(h)
+}
+
+tap_pad :: proc(h: ^Harness, button: ui.Gamepad_Button) {
+	h.input.gamepad_down = {button}
+	h.input.gamepad_pressed = {button}
+	run_frame(h)
+	h.input.gamepad_down = {}
+	run_frame(h)
+	run_frame(h)
+}
+
+focus_s1 :: proc(h: ^Harness) {
+	h.input.gamepad_connected = true
+	run_frame(h)
+	tap_pad(h, .DPAD_DOWN)
+	tap_pad(h, .DPAD_DOWN)
+}
+
 @(test)
-gamepad_view_plus_face_buttons_jump_between_regions :: proc(t: ^testing.T) {
+area_overlay_toggles_with_lt_rt :: proc(t: ^testing.T) {
 	h: Harness
 	harness_init(&h)
 	defer ui.destroy(&h.ctx)
-	h.input.gamepad_connected = true
-	run_frame(&h)
-
-	tap :: proc(h: ^Harness, button: ui.Gamepad_Button, held: ui.Gamepad_Buttons = {}) {
-		h.input.gamepad_down = held + {button}
-		h.input.gamepad_pressed = {button}
-		run_frame(h)
-		h.input.gamepad_down = held
-		run_frame(h)
-	}
-
-	// Focus S1 in the sidebar first.
-	tap(&h, .DPAD_DOWN)
-	tap(&h, .DPAD_DOWN)
+	focus_s1(&h)
 	testing.expect_value(t, focused_name(&h), "S1")
 
-	// Hold View: after a moment the overlay shows, and the face buttons
-	// pick a region.
-	h.input.gamepad_down = {.SELECT}
-	run_frame(&h)
-	testing.expect(t, !h.ctx.show_region_overlay, "not on the first frame, so a tap doesn't flash it")
-	for _ in 0 ..< 12 do run_frame(&h)
-	testing.expect(t, h.ctx.show_region_overlay, "holding View shows the overlay")
+	// LT+RT together: the overlay opens and stays open.
+	press_together(&h, {.LEFT_TRIGGER, .RIGHT_TRIGGER})
+	testing.expect(t, h.ctx.show_region_overlay, "LT+RT opens the overlay")
+	for _ in 0 ..< 20 do run_frame(&h)
+	testing.expect(t, h.ctx.show_region_overlay, "and it stays open")
 
-	// B (right) jumps into the grid -- and doesn't also act as Cancel.
-	tap(&h, .FACE_RIGHT, {.SELECT})
+	// The D-pad and the left stick do nothing while the overlay is up.
+	tap_pad(&h, .DPAD_DOWN)
+	tap_pad(&h, .DPAD_RIGHT)
+	testing.expect_value(t, focused_name(&h), "S1")
+	h.input.left_stick = {1, 0}
+	run_frames_n(&h, 3)
+	h.input.left_stick = {}
+	run_frames_n(&h, 2)
+	testing.expect_value(t, focused_name(&h), "S1")
+	testing.expect(t, h.ctx.show_region_overlay, "and they don't close it either")
+
+	// B (right) jumps into the grid without acting as Cancel; A has nowhere
+	// to go and must not click.
+	tap_pad(&h, .FACE_RIGHT)
 	testing.expectf(t, focused_name(&h) == "G0" || focused_name(&h) == "G2", "jumped into the grid, got %q", focused_name(&h))
-	testing.expect(t, .CANCEL not_in h.ctx.nav_pressed)
-
-	// A (down) has no region below; it must not activate the focused
-	// button either.
-	tap(&h, .FACE_DOWN, {.SELECT})
-	for result in h.results do testing.expect(t, .CLICKED not_in result, "A while holding View doesn't click")
-
-	// X (left) goes back to the sidebar, to the button it last had (S1).
-	tap(&h, .FACE_LEFT, {.SELECT})
-	h.input.gamepad_down = {}
-	run_frame(&h)
+	tap_pad(&h, .FACE_DOWN)
+	for result in h.results do testing.expect(t, .CLICKED not_in result, "A doesn't click while the overlay is up")
+	tap_pad(&h, .FACE_LEFT)
 	testing.expect_value(t, focused_name(&h), "S1")
-	testing.expect(t, !h.ctx.show_region_overlay, "releasing View hides the overlay")
 
-	// Without View held, A activates as usual.
+	// LT+RT again closes it -- pressed in the other order this time.
+	h.input.gamepad_down = {.RIGHT_TRIGGER}
+	h.input.gamepad_pressed = {.RIGHT_TRIGGER}
+	run_frame(&h)
+	h.input.gamepad_down = {.RIGHT_TRIGGER, .LEFT_TRIGGER}
+	h.input.gamepad_pressed = {.LEFT_TRIGGER}
+	run_frame(&h)
+	h.input.gamepad_down = {}
+	run_frames_n(&h, 2)
+	testing.expect(t, !h.ctx.show_region_overlay, "LT+RT again closes it")
+
+	// Closed, A activates as usual.
 	h.input.gamepad_pressed = {.FACE_DOWN}
 	run_frame(&h)
-	testing.expect(t, .CLICKED in h.results[1], "A activates when View isn't held")
+	testing.expect(t, .CLICKED in h.results[1], "A activates once the overlay is closed")
+}
+
+@(test)
+area_overlay_hold_mode :: proc(t: ^testing.T) {
+	h: Harness
+	harness_init(&h)
+	defer ui.destroy(&h.ctx)
+	h.ctx.region_jump_mode = .HOLD
+	focus_s1(&h)
+
+	h.input.gamepad_down = {.LEFT_TRIGGER, .RIGHT_TRIGGER}
+	h.input.gamepad_pressed = {.LEFT_TRIGGER, .RIGHT_TRIGGER}
+	run_frame(&h)
+	testing.expect(t, !h.ctx.show_region_overlay, "not on the first frame, so brushing the chord doesn't flash it")
+	for _ in 0 ..< 12 do run_frame(&h)
+	testing.expect(t, h.ctx.show_region_overlay, "holding LT+RT shows the overlay")
+
+	held := ui.Gamepad_Buttons{.LEFT_TRIGGER, .RIGHT_TRIGGER}
+	h.input.gamepad_down = held + {.FACE_RIGHT}
+	h.input.gamepad_pressed = {.FACE_RIGHT}
+	run_frame(&h)
+	h.input.gamepad_down = held
+	run_frame(&h)
+	testing.expectf(t, focused_name(&h) == "G0" || focused_name(&h) == "G2", "jumped into the grid, got %q", focused_name(&h))
+
+	h.input.gamepad_down = {}
+	run_frame(&h)
+	testing.expect(t, !h.ctx.show_region_overlay, "letting go hides it")
+}
+
+run_frames_n :: proc(h: ^Harness, count: int) {
+	for _ in 0 ..< count do run_frame(h)
 }
 
 @(test)
@@ -426,51 +484,92 @@ ctrl_number_jumps_and_ctrl_hold_shows_overlay :: proc(t: ^testing.T) {
 }
 
 @(test)
-hold_button_still_works_as_a_tap :: proc(t: ^testing.T) {
+chord_buttons_still_work_alone :: proc(t: ^testing.T) {
 	h: Harness
 	harness_init(&h)
 	defer ui.destroy(&h.ctx)
 	h.input.gamepad_connected = true
-	// Bind the hold to Menu, which is also the context-menu button.
-	h.ctx.region_jump_hold = ui.triggers(ui.pad(.START))
-	run_frame(&h)
-	h.input.gamepad_pressed = {.DPAD_DOWN}
-	run_frame(&h)
 	run_frame(&h)
 
-	// A quick tap of Menu: no context menu while it's down, one on release.
-	h.input.gamepad_down = {.START}
-	h.input.gamepad_pressed = {.START}
-	run_frame(&h)
-	testing.expect(t, .CONTEXT_MENU not_in h.ctx.nav_pressed, "not on press")
-	h.input.gamepad_down = {}
+	// LT is half of the LT+RT chord. Tapped on its own it's passed on as an
+	// ordinary press when it's released -- not before, or every LT+RT would
+	// also page.
+	h.input.gamepad_down = {.LEFT_TRIGGER}
+	h.input.gamepad_pressed = {.LEFT_TRIGGER}
 	ui.begin_frame(&h.ctx, h.input)
-	testing.expect(t, .CONTEXT_MENU in h.ctx.nav_pressed, "the tap is passed on at release")
+	testing.expect(t, !ui.trigger_pressed(&h.ctx, ui.pad(.LEFT_TRIGGER)), "not on press")
 	ui.end_frame(&h.ctx)
 	h.input.time += 1.0 / 60.0
-
-	// Holding Menu and jumping: no context menu at all.
-	h.input.gamepad_down = {.START}
-	h.input.gamepad_pressed = {.START}
-	run_frame(&h)
-	h.input.gamepad_down = {.START, .FACE_RIGHT}
-	h.input.gamepad_pressed = {.FACE_RIGHT}
-	ui.begin_frame(&h.ctx, h.input)
-	testing.expect(t, .CONTEXT_MENU not_in h.ctx.nav_pressed)
-	ui.end_frame(&h.ctx)
 	h.input.gamepad_pressed = {}
 	h.input.gamepad_down = {}
 	ui.begin_frame(&h.ctx, h.input)
-	testing.expect(t, .CONTEXT_MENU not_in h.ctx.nav_pressed, "a hold that jumped isn't a tap")
+	testing.expect(t, ui.trigger_pressed(&h.ctx, ui.pad(.LEFT_TRIGGER)), "on release")
 	ui.end_frame(&h.ctx)
+	h.input.time += 1.0 / 60.0
 
-	// A long hold without jumping isn't a tap either.
-	h.input.gamepad_down = {.START}
-	h.input.gamepad_pressed = {.START}
+	// Used in the chord, it isn't passed on at all.
+	h.input.gamepad_down = {.LEFT_TRIGGER, .RIGHT_TRIGGER}
+	h.input.gamepad_pressed = {.LEFT_TRIGGER, .RIGHT_TRIGGER}
 	run_frame(&h)
-	for _ in 0 ..< 30 do run_frame(&h)
 	h.input.gamepad_down = {}
 	ui.begin_frame(&h.ctx, h.input)
-	testing.expect(t, .CONTEXT_MENU not_in h.ctx.nav_pressed, "a long hold isn't a tap")
+	testing.expect(t, !ui.trigger_pressed(&h.ctx, ui.pad(.LEFT_TRIGGER)), "a chord isn't also a tap")
 	ui.end_frame(&h.ctx)
+
+	// That LT+RT opened the area overlay, which blocks every other button;
+	// close it again.
+	testing.expect(t, h.ctx.region_jump_toggled, "LT+RT toggled the overlay on")
+	h.input.time += 1.0 / 60.0
+	h.input.gamepad_down = {.LEFT_TRIGGER, .RIGHT_TRIGGER}
+	h.input.gamepad_pressed = {.LEFT_TRIGGER, .RIGHT_TRIGGER}
+	run_frame(&h)
+	h.input.gamepad_down = {}
+	run_frame(&h)
+	testing.expect(t, !h.ctx.region_jump_toggled)
+
+	// A chord the app registers (View+RT) works too.
+	h.ctx.gamepad_modifiers = {.SELECT, .RIGHT_TRIGGER}
+	h.input.time += 1
+	h.input.gamepad_down = {.SELECT}
+	h.input.gamepad_pressed = {.SELECT}
+	run_frame(&h)
+	h.input.gamepad_down = {.SELECT, .RIGHT_TRIGGER}
+	h.input.gamepad_pressed = {.RIGHT_TRIGGER}
+	ui.begin_frame(&h.ctx, h.input)
+	testing.expect(t, ui.trigger_pressed(&h.ctx, ui.pad_chord(.SELECT, .RIGHT_TRIGGER)), "View+RT")
+	testing.expect(t, !ui.trigger_pressed(&h.ctx, ui.pad_chord(.LEFT_TRIGGER, .RIGHT_TRIGGER)), "not LT+RT")
+	ui.end_frame(&h.ctx)
+}
+
+@(test)
+area_overlay_freezes_list_scrolling :: proc(t: ^testing.T) {
+	h: List_Harness
+	ui.init(&h.ctx, ui.Backend{measure_text = fake_measure})
+	defer ui.destroy(&h.ctx)
+	h.input.screen_size = {800, 600}
+	h.input.gamepad_connected = true
+	h.input.pointer_position = {150, 300}
+	list_frame(&h)
+
+	// Open the overlay, then push the right stick over the list.
+	h.input.gamepad_down = {.LEFT_TRIGGER, .RIGHT_TRIGGER}
+	h.input.gamepad_pressed = {.LEFT_TRIGGER, .RIGHT_TRIGGER}
+	list_frame(&h)
+	h.input.gamepad_down = {}
+	list_frame(&h)
+	testing.expect(t, h.ctx.show_region_overlay)
+	h.input.right_stick = {0, 1}
+	for _ in 0 ..< 20 do list_frame(&h)
+	testing.expect_value(t, h.list.offset, 0)
+
+	// Closed again, the stick scrolls.
+	h.input.right_stick = {}
+	h.input.gamepad_down = {.LEFT_TRIGGER, .RIGHT_TRIGGER}
+	h.input.gamepad_pressed = {.LEFT_TRIGGER, .RIGHT_TRIGGER}
+	list_frame(&h)
+	h.input.gamepad_down = {}
+	list_frame(&h)
+	h.input.right_stick = {0, 1}
+	for _ in 0 ..< 20 do list_frame(&h)
+	testing.expect(t, h.list.offset > 0, "the right stick scrolls once the overlay is closed")
 }

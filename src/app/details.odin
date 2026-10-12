@@ -67,47 +67,51 @@ layout_columns :: proc(row: ui.Rect) -> Columns {
 	return columns
 }
 
-build_details_view :: proc(a: ^App, ctx: ^ui.Context, view: ^View, area: ui.Rect) {
+build_details_view :: proc(a: ^App, ctx: ^ui.Context, view: ^View, area: ui.Rect, title: string) {
 	ui.push_id_int(ctx, int(view.id))
 	defer ui.pop_id(ctx)
-	ui.begin_region(ctx, "Files", area)
+	ui.begin_region(ctx, "Files", area, title)
 	defer ui.end_region(ctx)
+	view.region_id = ui.current_region(ctx)
 
 	rect := area
 	header := ui.cut_top(&rect, HEADER_HEIGHT)
 	build_header(ctx, view, header)
 
 	now := ctx.input.time
-	if view.listing == nil || (view.loading && now - view.loading_since > LOADING_GRACE_SECONDS) {
-		message := "Loading…"
-		if !view.loading do message = ""
-		ui.label(ctx, ui.inset(rect, 24), message, ctx.theme.text_dim, .CENTER)
-		return
+	// The list always exists -- empty while loading or on an error -- so
+	// it can hold focus the moment a view is created or switched to.
+	message := ""
+	showing_old := view.listing != nil && !(view.loading && now - view.loading_since > LOADING_GRACE_SECONDS)
+	if !showing_old && view.loading do message = "Loading…"
+	if showing_old && view.listing.error != .NONE {
+		message = fs.listing_error_message(view.listing.error)
+		showing_old = false
 	}
-	if view.listing.error != .NONE {
-		ui.label(ctx, ui.inset(rect, 24), fs.listing_error_message(view.listing.error), ctx.theme.text_dim, .CENTER)
-		return
+	if showing_old && len(view.order) == 0 {
+		message = "This folder is empty."
+		if len(view.listing.entries) > 0 do message = "Only hidden files here."
 	}
 
+	row_count := 0
+	if showing_old do row_count = len(view.order)
 	scroll_to := -1
-	if view.scroll_to_cursor do scroll_to = view.cursor
-	view.scroll_to_cursor = false
+	if view.scroll_to_cursor && showing_old do scroll_to = view.cursor
+	if showing_old do view.scroll_to_cursor = false
 
-	list := ui.begin_virtual_list(ctx, "rows", rect, len(view.order), ROW_HEIGHT, scroll_to)
+	list := ui.begin_virtual_list(ctx, "rows", rect, row_count, ROW_HEIGHT, scroll_to)
 	view.list_id = list.id
 	// The old listing stays visible during the grace period, but rows
 	// mustn't act on it: its paths belong to the folder being left.
-	interactive := !view.loading
+	interactive := !view.loading && showing_old
 	if interactive && list.focused do handle_list_keys(a, ctx, view, list)
 
-	for position in list.first ..< list.last {
-		build_row(a, ctx, view, list, position, interactive)
+	if showing_old {
+		for position in list.first ..< list.last {
+			build_row(a, ctx, view, list, position, interactive)
+		}
 	}
-	if len(view.order) == 0 {
-		message := "This folder is empty."
-		if len(view.listing.entries) > 0 do message = "Only hidden files here."
-		ui.label(ctx, ui.inset(rect, 24), message, ctx.theme.text_dim, .CENTER)
-	}
+	if len(message) > 0 do ui.label(ctx, ui.inset(rect, 24), message, ctx.theme.text_dim, .CENTER)
 	ui.end_virtual_list(ctx, list)
 }
 

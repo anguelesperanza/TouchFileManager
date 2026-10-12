@@ -10,17 +10,42 @@ import "core:math"
 // toolbar, file list. Each region remembers what was last focused in it, so
 // jumping away and back lands where you left off.
 
-// `title` names the region in the jump overlay and also scopes the ids of
-// the widgets inside it. `rect` is the area it covers on screen, used to
-// work out which region lies in which direction.
-begin_region :: proc(ctx: ^Context, title: string, rect: Rect) {
-	id := get_id(ctx, title)
+// `label` identifies the region and scopes the ids of the widgets inside
+// it; `title` is what the jump overlay calls it (the label, if empty). They
+// are separate so a title can change -- a view titled by its folder --
+// without the region's identity, and with it everything focused inside,
+// changing. `rect` is the area it covers, used to work out which region lies
+// in which direction.
+begin_region :: proc(ctx: ^Context, label: string, rect: Rect, title := "") {
+	id := get_id(ctx, label)
 	append(&ctx.region_stack, id)
 	append(&ctx.id_stack, id)
 	for region in ctx.regions {
 		if region.id == id do return
 	}
-	append(&ctx.regions, Region{id = id, rect = rect, title = clone_to_frame(ctx, title)})
+	shown := title
+	if len(shown) == 0 do shown = label
+	append(&ctx.regions, Region{id = id, rect = rect, title = clone_to_frame(ctx, shown)})
+}
+
+// The region being built right now, or 0.
+current_region :: proc(ctx: ^Context) -> Id {
+	if len(ctx.region_stack) == 0 do return 0
+	return ctx.region_stack[len(ctx.region_stack) - 1]
+}
+
+// The region holding the focused widget this frame, or 0. Only meaningful
+// once the frame's widgets have been built.
+focused_region :: proc(ctx: ^Context) -> Id {
+	index := find_focusable(ctx, ctx.focus)
+	if index < 0 do return 0
+	return ctx.focusables[index].region
+}
+
+// Gives focus to a region's remembered (or first) widget, as a jump would.
+// Uses the widgets registered so far this frame.
+focus_region_by_id :: proc(ctx: ^Context, region: Id) -> bool {
+	return focus_region(ctx, region)
 }
 
 end_region :: proc(ctx: ^Context) {
@@ -131,21 +156,26 @@ move_focus_spatial :: proc(ctx: ^Context, direction: Vec2) {
 
 	current := ctx.focusables[index]
 
-	// Stay inside the current region when something lies in that
-	// direction; only cross into a neighbouring region from its edge.
-	best := best_in_direction(ctx, current, direction, true)
-	if best < 0 do best = best_in_direction(ctx, current, direction, false)
+	// Only widgets "in the beam" count -- overlapping the current one
+	// across the direction of travel, the way the eye scans -- preferring
+	// the same region. If nothing is, focus stays put. Without the beam,
+	// Right from a file list climbed diagonally up to a column header
+	// instead of reaching the splitter or the view beside it, or doing
+	// nothing when there's nothing to the right.
+	best := best_in_direction(ctx, current, direction, true, true)
+	if best < 0 do best = best_in_direction(ctx, current, direction, false, true)
 	if best >= 0 do ctx.focus = ctx.focusables[best].id
 }
 
 @(private)
-best_in_direction :: proc(ctx: ^Context, current: Focusable, direction: Vec2, same_region: bool) -> int {
+best_in_direction :: proc(ctx: ^Context, current: Focusable, direction: Vec2, same_region: bool, in_beam: bool) -> int {
 	from := rect_center(current.rect)
 	best := -1
 	best_score := max(f32)
 	for candidate, i in ctx.focusables {
 		if candidate.id == current.id do continue
 		if same_region && candidate.region != current.region do continue
+		if in_beam && !overlaps_across(current.rect, candidate.rect, direction) do continue
 
 		to := rect_center(candidate.rect)
 		delta := to - from
@@ -162,4 +192,12 @@ best_in_direction :: proc(ctx: ^Context, current: Focusable, direction: Vec2, sa
 		}
 	}
 	return best
+}
+
+// Whether two rects share any span across the direction of travel: for
+// left/right, any vertical overlap; for up/down, any horizontal overlap.
+@(private)
+overlaps_across :: proc(a: Rect, b: Rect, direction: Vec2) -> bool {
+	if direction.x != 0 do return a.y < b.y + b.h && b.y < a.y + a.h
+	return a.x < b.x + b.w && b.x < a.x + a.w
 }

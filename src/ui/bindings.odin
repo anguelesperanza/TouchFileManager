@@ -29,9 +29,19 @@ Key_Chord :: struct {
 	modifiers: Modifiers,
 }
 
+// Two gamepad buttons pressed together, in either order: "View+RT",
+// "LT+RT". Chord buttons form a layer -- while one is held, other buttons do
+// their chord action instead of their usual one (see update_gamepad_layer).
+Gamepad_Chord :: struct {
+	modifier: Gamepad_Button,
+	button:   Gamepad_Button,
+}
+
 Trigger :: union {
 	Key_Chord,
 	Gamepad_Button,
+	Gamepad_Chord,
+	Mouse_Button,
 }
 
 MAX_TRIGGERS_PER_ACTION :: 8
@@ -57,6 +67,14 @@ pad :: proc(button: Gamepad_Button) -> Trigger {
 	return button
 }
 
+pad_chord :: proc(modifier: Gamepad_Button, button: Gamepad_Button) -> Trigger {
+	return Gamepad_Chord{modifier = modifier, button = button}
+}
+
+mouse :: proc(button: Mouse_Button) -> Trigger {
+	return button
+}
+
 default_nav_bindings :: proc() -> [Nav_Action]Trigger_List {
 	bindings: [Nav_Action]Trigger_List
 	bindings[.UP] = triggers(key(.UP), pad(.DPAD_UP))
@@ -65,8 +83,10 @@ default_nav_bindings :: proc() -> [Nav_Action]Trigger_List {
 	bindings[.RIGHT] = triggers(key(.RIGHT), pad(.DPAD_RIGHT))
 	bindings[.ACTIVATE] = triggers(key(.ENTER), key(.SPACE), pad(.FACE_DOWN))
 	bindings[.CANCEL] = triggers(key(.ESCAPE), pad(.FACE_RIGHT))
-	bindings[.NEXT_REGION] = triggers(key(.TAB), pad(.RIGHT_SHOULDER))
-	bindings[.PREVIOUS_REGION] = triggers(key(.TAB, {.SHIFT}), pad(.LEFT_SHOULDER))
+	// No gamepad default: LB/RB belong to tabs, and the View + face-button
+	// area jump covers moving between areas on a controller.
+	bindings[.NEXT_REGION] = triggers(key(.TAB))
+	bindings[.PREVIOUS_REGION] = triggers(key(.TAB, {.SHIFT}))
 	bindings[.CONTEXT_MENU] = triggers(key(.MENU), key(.F10, {.SHIFT}), pad(.START))
 	return bindings
 }
@@ -76,9 +96,18 @@ default_nav_bindings :: proc() -> [Nav_Action]Trigger_List {
 trigger_pressed :: proc(ctx: ^Context, trigger: Trigger) -> bool {
 	switch t in trigger {
 	case Key_Chord:
+		if ctx.keyboard_captured do return false
 		return t.key in ctx.input.keys_pressed && ctx.input.modifiers == t.modifiers
 	case Gamepad_Button:
 		return t in ctx.gamepad_repeated
+	case Gamepad_Chord:
+		// Order-free: both buttons down, and one of them pressed just now.
+		down := ctx.input.gamepad_down
+		pressed := ctx.gamepad_layer_pressed
+		both_down := t.modifier in down && t.button in down
+		return both_down && (t.modifier in pressed || t.button in pressed)
+	case Mouse_Button:
+		return t in ctx.input.mouse_pressed
 	}
 	return false
 }
@@ -244,6 +273,14 @@ GAMEPAD_ALIASES := [?]struct {
 	{"R3", .RIGHT_STICK},
 }
 
+MOUSE_NAMES := [Mouse_Button]string{
+	.LEFT = "Left",
+	.RIGHT = "Right",
+	.MIDDLE = "Middle",
+	.BACK = "Back",
+	.FORWARD = "Forward",
+}
+
 @(private)
 MODIFIER_ALIASES := [?]struct {
 	name:     string,
@@ -267,8 +304,34 @@ trigger_to_string :: proc(trigger: Trigger, allocator := context.temp_allocator)
 		return strings.to_string(builder)
 	case Gamepad_Button:
 		return strings.clone(GAMEPAD_NAMES[t], allocator)
+	case Gamepad_Chord:
+		return strings.concatenate({GAMEPAD_NAMES[t.modifier], "+", GAMEPAD_NAMES[t.button]}, allocator)
+	case Mouse_Button:
+		return strings.clone(MOUSE_NAMES[t], allocator)
 	}
 	return ""
+}
+
+// "RB" or "View+RB".
+parse_gamepad_trigger :: proc(text: string) -> (Trigger, bool) {
+	plus := strings.index_byte(text, '+')
+	if plus < 0 {
+		button, ok := parse_gamepad_button(text)
+		if !ok do return nil, false
+		return button, true
+	}
+	modifier, modifier_ok := parse_gamepad_button(text[:plus])
+	button, button_ok := parse_gamepad_button(text[plus + 1:])
+	if !modifier_ok || !button_ok || modifier == button do return nil, false
+	return Gamepad_Chord{modifier = modifier, button = button}, true
+}
+
+parse_mouse_button :: proc(text: string) -> (Mouse_Button, bool) {
+	name := strings.trim_space(text)
+	for button_name, button in MOUSE_NAMES {
+		if strings.equal_fold(name, button_name) do return button, true
+	}
+	return {}, false
 }
 
 // Parses one keyboard binding, like "Ctrl+Shift+Tab". Names are matched
